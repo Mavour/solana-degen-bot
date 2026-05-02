@@ -1,5 +1,5 @@
 // src/telegram/bot.ts
-// Telegraf Telegram bot - Alert + Manual Approval Flow
+// Telegraf Telegram bot — Alert + Manual Approval + Missed Signals
 
 import { Telegraf, Markup, Context } from 'telegraf';
 import { config } from '../config';
@@ -12,8 +12,21 @@ import type { DryRunExecutor } from '../execution/dryrun';
 
 const MODULE = 'TELEGRAM';
 
-// Approval TTL: 5 menit
-const APPROVAL_TTL_MS = 5 * 60 * 1000;
+// TTL bisa dikonfigurasi — default 10 menit (lebih santai dari 5 menit sebelumnya)
+const APPROVAL_TTL_MS = parseInt(process.env.APPROVAL_TTL_MINUTES ?? '10') * 60 * 1000;
+// Reminder dikirim di 50% TTL (misal TTL 10 menit → reminder menit ke-5)
+const REMINDER_AT_MS  = Math.floor(APPROVAL_TTL_MS / 2);
+
+interface MissedSignal {
+  symbol: string;
+  tokenAddress: string;
+  confidence: string;
+  emaTouched: number;
+  stochRsiK: number;
+  mcapUsd: number;
+  expiredAt: number;
+  reason: 'EXPIRED' | 'CANCELLED';
+}
 
 type ApprovalCallback = (request: ApprovalRequest) => Promise<void>;
 
@@ -22,7 +35,7 @@ export class TelegramBot {
   private pendingApprovals: Map<string, ApprovalRequest> = new Map();
   private onApproveCallback: ApprovalCallback | null = null;
   private riskManager: RiskManager;
-  // Injected after construction to avoid circular dep
+  private missedSignals: MissedSignal[] = [];
   scannerRouter: ScannerRouter | null = null;
   dryRunExecutor: DryRunExecutor | null = null;
 
@@ -32,8 +45,11 @@ export class TelegramBot {
     this.setupHandlers();
   }
 
+  // ── Handlers ─────────────────────────────────────────────────
+
   private setupHandlers(): void {
-    // /start command — show main menu keyboard
+
+    // /start — show persistent keyboard menu
     this.bot.command('start', async (ctx) => {
       const modeLabel = config.dryRun ? '🧪 DRY RUN' : '🟢 LIVE';
       const keyboard = Markup.keyboard([
@@ -41,7 +57,7 @@ export class TelegramBot {
         config.dryRun
           ? ['📝 Dry Report', '❓ Help']
           : ['❓ Help'],
-        ['✖️ Tutup Menu'],
+        ['⏭ Missed Signals', '✖️ Tutup Menu'],
       ]).resize().persistent();
 
       await ctx.reply(
@@ -54,62 +70,53 @@ export class TelegramBot {
       );
     });
 
-    // Handle keyboard button taps (reply keyboard)
-    this.bot.hears('📊 Status', async (ctx) => ctx.reply('/status dipanggil...').then(() => {
-      return this.handleStatus(ctx);
-    }));
-    this.bot.hears('📂 Positions', async (ctx) => this.handlePositions(ctx));
-    this.bot.hears('📝 Dry Report', async (ctx) => this.handleDryReport(ctx));
-    this.bot.hears('❓ Help', async (ctx) => this.handleHelp(ctx));
-
-    // ✖️ Tutup Menu — sembunyikan reply keyboard
-    this.bot.hears('✖️ Tutup Menu', async (ctx) => {
+    // Keyboard button taps
+    this.bot.hears('📊 Status',        async (ctx) => this.handleStatus(ctx));
+    this.bot.hears('📂 Positions',     async (ctx) => this.handlePositions(ctx));
+    this.bot.hears('📝 Dry Report',    async (ctx) => this.handleDryReport(ctx));
+    this.bot.hears('❓ Help',          async (ctx) => this.handleHelp(ctx));
+    this.bot.hears('⏭ Missed Signals', async (ctx) => this.handleMissed(ctx));
+    this.bot.hears('✖️ Tutup Menu',    async (ctx) => {
       await ctx.reply(
         'Menu disembunyikan. Ketik /start untuk tampilkan lagi.',
         Markup.removeKeyboard()
       );
     });
 
-    // /status command
-    this.bot.command('status', async (ctx) => this.handleStatus(ctx));
-
-    // /positions command
+    // Slash commands
+    this.bot.command('status',    async (ctx) => this.handleStatus(ctx));
     this.bot.command('positions', async (ctx) => this.handlePositions(ctx));
-
-    // /dryreport command
     this.bot.command('dryreport', async (ctx) => this.handleDryReport(ctx));
+    this.bot.command('missed',    async (ctx) => this.handleMissed(ctx));
+    this.bot.command('help',      async (ctx) => this.handleHelp(ctx));
 
-    // /help command
-    this.bot.command('help', async (ctx) => this.handleHelp(ctx));
-
-    // Handle APPROVE button callback
+    // APPROVE / CANCEL inline button callbacks
     this.bot.action(/^APPROVE_(.+)$/, async (ctx) => {
-      const approvalId = ctx.match[1];
-      await this.handleApproval(ctx, approvalId, 'APPROVED');
+      await this.handleApproval(ctx, ctx.match[1], 'APPROVED');
     });
-
-    // Handle CANCEL button callback
     this.bot.action(/^CANCEL_(.+)$/, async (ctx) => {
-      const approvalId = ctx.match[1];
-      await this.handleApproval(ctx, approvalId, 'REJECTED');
+      await this.handleApproval(ctx, ctx.match[1], 'REJECTED');
     });
 
-    // Inline button callbacks for status/positions refresh
+    // Inline refresh callbacks
     this.bot.action('STATUS_REFRESH', async (ctx) => {
       await ctx.answerCbQuery('Refreshing...');
       await ctx.deleteMessage().catch(() => {});
       await this.handleStatus(ctx);
     });
-
     this.bot.action('SHOW_POSITIONS', async (ctx) => {
       await ctx.answerCbQuery();
       await ctx.deleteMessage().catch(() => {});
       await this.handlePositions(ctx);
     });
-
     this.bot.action('SHOW_DRYREPORT', async (ctx) => {
       await ctx.answerCbQuery();
       await this.handleDryReport(ctx);
+    });
+    this.bot.action('CLEAR_MISSED', async (ctx) => {
+      this.missedSignals = [];
+      await ctx.answerCbQuery('✅ List cleared');
+      await ctx.editMessageText('✅ Missed signals list dikosongkan.');
     });
 
     // Error handler
@@ -118,7 +125,7 @@ export class TelegramBot {
     });
   }
 
-  // ── Shared handler methods (used by both commands and keyboard buttons) ──
+  // ── Shared handlers ──────────────────────────────────────────
 
   private async handleStatus(ctx: Context): Promise<void> {
     const openPos = this.riskManager.getOpenPositions().length;
@@ -128,42 +135,31 @@ export class TelegramBot {
     const uptimeStr = uptime < 3600
       ? `${Math.floor(uptime / 60)}m`
       : `${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m`;
+    const ttlMin = Math.floor(APPROVAL_TTL_MS / 60000);
 
     const keyboard = Markup.inlineKeyboard([
       [
         Markup.button.callback('🔄 Refresh', 'STATUS_REFRESH'),
         Markup.button.callback('📂 Positions', 'SHOW_POSITIONS'),
       ],
-      config.dryRun
-        ? [Markup.button.callback('📝 Dry Report', 'SHOW_DRYREPORT')]
-        : [],
-    ].filter(row => row.length > 0));
+      ...(config.dryRun
+        ? [[Markup.button.callback('📝 Dry Report', 'SHOW_DRYREPORT')]]
+        : []),
+    ]);
 
     await ctx.reply(
-      `📊 *Bot Status*
-
-` +
-      (config.dryRun ? `🧪 *MODE: DRY RUN*
-` : `🟢 *MODE: LIVE TRADING*
-`) +
-      `⏱ Uptime: ${uptimeStr}
-` +
-      `📈 Positions: ${openPos}/${config.risk.maxOpenPositions}
-` +
-      `⏳ Pending approvals: ${pending}
-
-` +
-      `⚙️ *Config*
-` +
-      `• Trade: ${config.trading.maxTradeSol} SOL
-` +
-      `• Stop Loss: -${config.risk.stopLossPct}%
-` +
-      `• RSI exit: >80
-` +
-      `• Scan: tiap ${config.scanning.intervalSeconds / 60} menit
-
-` +
+      `📊 *Bot Status*\n\n` +
+      (config.dryRun ? `🧪 *MODE: DRY RUN*\n` : `🟢 *MODE: LIVE TRADING*\n`) +
+      `⏱ Uptime: ${uptimeStr}\n` +
+      `📈 Positions: ${openPos}/${config.risk.maxOpenPositions}\n` +
+      `⏳ Pending approvals: ${pending}\n` +
+      `⏭ Missed signals: ${this.missedSignals.length}\n\n` +
+      `⚙️ *Config*\n` +
+      `• Trade: ${config.trading.maxTradeSol} SOL\n` +
+      `• Stop Loss: -${config.risk.stopLossPct}%\n` +
+      `• RSI exit: >80\n` +
+      `• Scan: tiap ${config.scanning.intervalSeconds / 60} menit\n` +
+      `• Alert TTL: ${ttlMin} menit\n\n` +
       scannerHealth,
       { parse_mode: 'Markdown', ...keyboard }
     );
@@ -179,9 +175,7 @@ export class TelegramBot {
       : Markup.inlineKeyboard([]);
 
     await ctx.reply(
-      `📂 *Open Positions*${mode}
-
-${summary}`,
+      `📂 *Open Positions*${mode}\n\n${summary}`,
       { parse_mode: 'Markdown', ...keyboard }
     );
   }
@@ -189,11 +183,8 @@ ${summary}`,
   private async handleDryReport(ctx: Context): Promise<void> {
     if (!config.dryRun) {
       await ctx.reply(
-        `ℹ️ *Mode: LIVE TRADING*
-
-` +
-        `Dry report hanya tersedia di DRY_RUN=true.
-` +
+        `ℹ️ *Mode: LIVE TRADING*\n\n` +
+        `Dry report hanya tersedia di DRY_RUN=true.\n` +
         `Cek /positions untuk open positions live.`,
         { parse_mode: 'Markdown' }
       );
@@ -206,15 +197,54 @@ ${summary}`,
     });
   }
 
+  private async handleMissed(ctx: Context): Promise<void> {
+    if (!this.missedSignals.length) {
+      await ctx.reply('✅ Tidak ada signal yang terlewat.', { parse_mode: 'Markdown' });
+      return;
+    }
+
+    const recent = this.missedSignals.slice(-10).reverse();
+    const ttlMin = Math.floor(APPROVAL_TTL_MS / 60000);
+
+    let text = `⏭ *Missed Signals* (${this.missedSignals.length} total)\n`;
+    text += `_Signal tidak direspons dalam ${ttlMin} menit_\n\n`;
+
+    for (const s of recent) {
+      const ago = Math.floor((Date.now() - s.expiredAt) / 60000);
+      const emoji = ({ HIGH: '🔥', MEDIUM: '⚡', LOW: '💡' } as Record<string,string>)[s.confidence] ?? '';
+      const label = s.reason === 'EXPIRED' ? '⏰ expired' : '❌ cancelled';
+      text += `• *${s.symbol}* ${emoji} — ${label} ${ago}m lalu\n`;
+      text += `  EMA${s.emaTouched} | RSI:${s.stochRsiK.toFixed(0)} | $${formatNumber(s.mcapUsd)}\n`;
+      text += `  [Chart](https://dexscreener.com/solana/${s.tokenAddress})\n`;
+    }
+
+    text += `\n_Ketik /missed kapan saja untuk cek list ini_`;
+
+    const keyboard = Markup.inlineKeyboard([
+      [Markup.button.callback('🗑 Clear List', 'CLEAR_MISSED')],
+    ]);
+
+    await ctx.reply(text, {
+      parse_mode: 'Markdown',
+      link_preview_options: { is_disabled: true },
+      ...keyboard,
+    });
+  }
+
   private async handleHelp(ctx: Context): Promise<void> {
+    const ttlMin = Math.floor(APPROVAL_TTL_MS / 60000);
+    const reminderMin = Math.floor(REMINDER_AT_MS / 60000);
+
     await ctx.reply(
       `❓ *Panduan Singkat*\n\n` +
       `*Alur bot:*\n` +
       `1. Bot scan otomatis tiap ${config.scanning.intervalSeconds / 60} menit\n` +
       `2. Alert dikirim ke sini saat ada signal\n` +
       `3. Kamu klik SIMULATE/APPROVE atau CANCEL\n` +
-      `4. Bot monitor RSI tiap 2 menit\n` +
-      `5. Alert lagi saat RSI peak (>80) → exit manual\n\n` +
+      `4. Kalau tidak ada respons dalam ${reminderMin} menit, bot kirim reminder\n` +
+      `5. Alert expired setelah ${ttlMin} menit, tersimpan di Missed Signals\n` +
+      `6. Bot monitor RSI tiap 2 menit, alert lagi saat RSI peak lebih dari 80\n` +
+      `7. Exit manual di DexScreener saat dapat exit alert\n\n` +
       `*Entry signal (Obicle method):*\n` +
       `• Harga menyentuh EMA 25/50/100/200\n` +
       `• Stoch RSI di bawah 20 (bottoming)\n\n` +
@@ -227,6 +257,7 @@ ${summary}`,
     );
   }
 
+  // ── Approval flow ─────────────────────────────────────────────
 
   private async handleApproval(
     ctx: Context,
@@ -240,21 +271,21 @@ ${summary}`,
       return;
     }
 
-    // Remove dari pending
     this.pendingApprovals.delete(approvalId);
 
     if (action === 'REJECTED') {
       request.status = 'REJECTED';
       this.riskManager.clearPendingApproval(request.signal.token.address);
 
+      // Simpan ke missed (cancelled by user)
+      this.addMissed(request.signal, 'CANCELLED');
+
       await ctx.answerCbQuery('❌ Trade dibatalkan');
       await ctx.editMessageText(
-        `❌ *TRADE DIBATALKAN*\n\n` +
-        `Token: ${request.signal.token.symbol}\n` +
-        `Dibatalkan oleh user`,
+        `❌ *TRADE DIBATALKAN*\n\nToken: ${request.signal.token.symbol}\nDibatalkan oleh user`,
         { parse_mode: 'Markdown' }
       );
-      logger.info(MODULE, `Trade REJECTED by user: ${request.signal.token.symbol}`);
+      logger.info(MODULE, `Trade REJECTED: ${request.signal.token.symbol}`);
       return;
     }
 
@@ -262,25 +293,23 @@ ${summary}`,
     if (Date.now() - request.timestamp > APPROVAL_TTL_MS) {
       request.status = 'EXPIRED';
       this.riskManager.clearPendingApproval(request.signal.token.address);
-
-      await ctx.answerCbQuery('⏰ Request sudah expired (5 menit)');
+      await ctx.answerCbQuery('⏰ Request sudah expired');
       await ctx.editMessageText(
-        `⏰ *REQUEST EXPIRED*\n\nToken: ${request.signal.token.symbol}\nSignal sudah terlalu lama.`,
+        `⏰ *REQUEST EXPIRED*\n\nToken: ${request.signal.token.symbol}`,
         { parse_mode: 'Markdown' }
       );
       return;
     }
 
     request.status = 'APPROVED';
-    await ctx.answerCbQuery('✅ Trade diapprove! Executing...');
+    await ctx.answerCbQuery('✅ Executing...');
     await ctx.editMessageText(
       `⏳ *EXECUTING TRADE...*\n\nToken: ${request.signal.token.symbol}\nMengirim via Jito Bundle...`,
       { parse_mode: 'Markdown' }
     );
 
-    logger.info(MODULE, `Trade APPROVED by user: ${request.signal.token.symbol}`);
+    logger.info(MODULE, `Trade APPROVED: ${request.signal.token.symbol}`);
 
-    // Trigger callback
     if (this.onApproveCallback) {
       try {
         await this.onApproveCallback(request);
@@ -291,16 +320,12 @@ ${summary}`,
     }
   }
 
-  /**
-   * Set callback untuk ketika user approve
-   */
+  // ── Public API ────────────────────────────────────────────────
+
   onApprove(callback: ApprovalCallback): void {
     this.onApproveCallback = callback;
   }
 
-  /**
-   * Kirim signal alert dengan tombol APPROVE/CANCEL
-   */
   async sendSignalAlert(
     signal: SignalResult,
     tradeParams: TradeParams,
@@ -309,6 +334,9 @@ ${summary}`,
   ): Promise<string> {
     const token = signal.token;
     const approvalId = `${Date.now()}_${token.address.slice(0, 8)}`;
+    const isDryRun = config.dryRun;
+    const ttlMin = Math.floor(APPROVAL_TTL_MS / 60000);
+    const reminderMin = Math.floor(REMINDER_AT_MS / 60000);
 
     const request: ApprovalRequest = {
       id: approvalId,
@@ -322,23 +350,45 @@ ${summary}`,
 
     this.pendingApprovals.set(approvalId, request);
 
-    // Auto-expire setelah 5 menit
+    // ── Reminder di setengah TTL ──────────────────────────────
+    const reminderTimer = setTimeout(async () => {
+      if (!this.pendingApprovals.has(approvalId)) return;
+      logger.info(MODULE, `Reminder: ${token.symbol}`);
+      await this.sendMessage(
+        `⏰ *Reminder — Signal Belum Direspons*\n\n` +
+        `🪙 *${token.symbol}* [${signal.confidence}]\n` +
+        `EMA${signal.emaTouched} | RSI K:${signal.stochRsiK.toFixed(1)}\n` +
+        `MCap: $${formatNumber(token.mcapUsd)}\n\n` +
+        `Tersisa *${reminderMin} menit* sebelum expired.\n` +
+        `Scroll ke atas untuk klik tombol.`
+      );
+    }, REMINDER_AT_MS);
+
+    // ── Auto-expire saat TTL habis ────────────────────────────
     setTimeout(() => {
-      if (this.pendingApprovals.has(approvalId)) {
-        this.pendingApprovals.delete(approvalId);
-        this.riskManager.clearPendingApproval(token.address);
-        logger.info(MODULE, `Approval ${approvalId} auto-expired`);
-      }
+      clearTimeout(reminderTimer);
+      if (!this.pendingApprovals.has(approvalId)) return;
+
+      this.pendingApprovals.delete(approvalId);
+      this.riskManager.clearPendingApproval(token.address);
+      this.addMissed(signal, 'EXPIRED');
+
+      logger.info(MODULE, `Signal expired (${ttlMin}min): ${token.symbol}`);
+      this.sendMessage(
+        `⏰ *Signal Expired* — ${token.symbol}\n` +
+        `_Tidak direspons dalam ${ttlMin} menit._\n` +
+        `Ketik /missed untuk lihat semua signal terlewat.`
+      ).catch(() => {});
     }, APPROVAL_TTL_MS);
 
-    const tokenAge = Math.floor(token.ageSeconds / 3600);
+    // ── Build alert message ───────────────────────────────────
+    const tokenAge    = Math.floor(token.ageSeconds / 3600);
     const tokenAgeMin = Math.floor((token.ageSeconds % 3600) / 60);
-    const confidenceEmoji = { HIGH: '🔥', MEDIUM: '⚡', LOW: '💡' }[signal.confidence];
-    const isDryRun = config.dryRun;
+    const confEmoji   = ({ HIGH: '🔥', MEDIUM: '⚡', LOW: '💡' } as Record<string,string>)[signal.confidence];
 
     const message =
       (isDryRun ? `🧪 *[DRY RUN] SIGNAL ALERT*\n` : '') +
-      `🎯 *SIGNAL - ${signal.confidence} CONFIDENCE* ${confidenceEmoji}\n` +
+      `🎯 *SIGNAL - ${signal.confidence} CONFIDENCE* ${confEmoji}\n` +
       `━━━━━━━━━━━━━━━━━━━━━\n\n` +
       `🪙 *${token.symbol}* (${token.name})\n` +
       `📊 MCap: $${formatNumber(token.mcapUsd)}\n` +
@@ -357,10 +407,9 @@ ${summary}`,
       `• Est. Fee: ${simulationResult.estimatedFeeSOL.toFixed(6)} SOL\n\n` +
       `🔗 [DexScreener](https://dexscreener.com/solana/${token.address}) | [GMGN](https://gmgn.ai/sol/token/${token.address})\n\n` +
       (isDryRun
-        ? `_Klik SIMULATE untuk catat paper trade (tidak ada tx nyata)_`
-        : `⏰ *Request expires in 5 minutes*`);
+        ? `_Klik SIMULATE untuk paper trade (no real tx)_`
+        : `⏰ Expires *${ttlMin} menit* | Reminder menit ke-${reminderMin}`);
 
-    // Button text berbeda untuk dry run
     const approveLabel = isDryRun
       ? `🧪 SIMULATE (${tradeParams.amountSol} SOL paper)`
       : `✅ APPROVE BUY (${tradeParams.amountSol} SOL)`;
@@ -376,8 +425,7 @@ ${summary}`,
         ...keyboard,
         link_preview_options: { is_disabled: true },
       } as Parameters<typeof this.bot.telegram.sendMessage>[2]);
-
-      logger.info(MODULE, `Alert sent for ${token.symbol}`);
+      logger.info(MODULE, `Alert sent: ${token.symbol}`);
     } catch (err) {
       logger.error(MODULE, 'Failed to send alert', err);
     }
@@ -385,44 +433,24 @@ ${summary}`,
     return approvalId;
   }
 
-  /**
-   * Kirim notifikasi hasil trade
-   */
   async sendTradeResult(
     symbol: string,
     success: boolean,
-    details: {
-      amountSol: number;
-      txSignature?: string;
-      bundleId?: string;
-      error?: string;
-    }
+    details: { amountSol: number; txSignature?: string; bundleId?: string; error?: string }
   ): Promise<void> {
-    let message: string;
-
-    if (success) {
-      message =
-        `✅ *TRADE EXECUTED*\n\n` +
+    const message = success
+      ? `✅ *TRADE EXECUTED*\n\n` +
         `🪙 Token: ${symbol}\n` +
         `💰 Amount: ${details.amountSol} SOL\n` +
-        (details.txSignature ? `🔗 [View TX](https://solscan.io/tx/${details.txSignature})\n` : '') +
         (details.bundleId ? `📦 Bundle: ${details.bundleId.slice(0, 12)}...\n` : '') +
-        `\n⚠️ *Monitor posisi dan set manual exit saat RSI puncak*`;
-    } else {
-      message =
-        `❌ *TRADE FAILED*\n\n` +
+        `\n⚠️ *Monitor posisi — exit manual saat RSI puncak*`
+      : `❌ *TRADE FAILED*\n\n` +
         `🪙 Token: ${symbol}\n` +
-        `💰 Amount: ${details.amountSol} SOL\n` +
         `Reason: ${details.error ?? 'Unknown error'}`;
-    }
 
     await this.sendMessage(message);
   }
 
-  /**
-   * Unified exit signal alert — covers RSI_PEAK, RSI_DROP, STOP_LOSS_PCT, TAKE_PROFIT_PCT
-   * Sesuai exit strategy Obicle: jual saat RSI puncak (>80)
-   */
   async sendExitSignalAlert(signal: ExitSignal): Promise<void> {
     const { position, reason, pnlPct, stochRsiK, stochRsiD } = signal;
     const pnlStr = `${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%`;
@@ -434,7 +462,7 @@ ${summary}`,
       TAKE_PROFIT_PCT: '🎯 *TARGET PROFIT TERCAPAI*',
     };
 
-    const urgencyNote: Record<string, string> = {
+    const urgency: Record<string, string> = {
       RSI_PEAK:        '💡 Exit sekarang atau tunggu konfirmasi RSI drop',
       RSI_DROP:        '⚠️ Momentum sudah berbalik — pertimbangkan exit',
       STOP_LOSS_PCT:   '🔴 *Loss melebihi threshold — exit manual segera*',
@@ -455,16 +483,13 @@ ${summary}`,
       `💵 Sekarang: $${signal.currentPrice.toFixed(8)}\n` +
       rsiInfo +
       `⏱ Hold: ${holdMin}m\n\n` +
-      `${urgencyNote[reason] ?? ''}\n\n` +
+      `${urgency[reason] ?? ''}\n\n` +
       `🔗 [DexScreener](https://dexscreener.com/solana/${position.tokenAddress})`;
 
     await this.sendMessage(text);
     logger.info(MODULE, `Exit alert: ${position.symbol} [${reason}] PnL:${pnlStr}`);
   }
 
-  /**
-   * Generic message sender
-   */
   async sendMessage(text: string): Promise<void> {
     try {
       await this.bot.telegram.sendMessage(config.telegram.chatId, text, {
@@ -476,42 +501,49 @@ ${summary}`,
     }
   }
 
-  /**
-   * Launch bot (polling mode)
-   */
   async launch(): Promise<void> {
     try {
-      // Register command menu — muncul di tombol hamburger (☰) Telegram
-      const commands = [
+      await this.bot.telegram.setMyCommands([
         { command: 'start',      description: '🏠 Menu utama' },
         { command: 'status',     description: '📊 Status bot & scanner' },
         { command: 'positions',  description: '📂 Open positions' },
+        { command: 'missed',     description: '⏭ Signal yang terlewat' },
         { command: 'dryreport',  description: '📝 Laporan paper trading' },
         { command: 'help',       description: '❓ Panduan singkat' },
-      ];
-      await this.bot.telegram.setMyCommands(commands);
-
-      await this.bot.launch({
-        allowedUpdates: ['message', 'callback_query'],
-      });
-      logger.info(MODULE, '🤖 Telegram bot launched (polling mode)');
+      ]);
+      await this.bot.launch({ allowedUpdates: ['message', 'callback_query'] });
+      logger.info(MODULE, '🤖 Telegram bot launched');
     } catch (err) {
       logger.error(MODULE, 'Bot launch failed', err);
       throw err;
     }
   }
 
-  /**
-   * Graceful shutdown
-   */
   stop(signal?: string): void {
     logger.info(MODULE, `Bot stopping (${signal ?? 'manual'})`);
     this.bot.stop(signal);
+  }
+
+  // ── Private helpers ───────────────────────────────────────────
+
+  private addMissed(signal: SignalResult, reason: 'EXPIRED' | 'CANCELLED'): void {
+    this.missedSignals.push({
+      symbol: signal.token.symbol,
+      tokenAddress: signal.token.address,
+      confidence: signal.confidence,
+      emaTouched: signal.emaTouched,
+      stochRsiK: signal.stochRsiK,
+      mcapUsd: signal.token.mcapUsd,
+      expiredAt: Date.now(),
+      reason,
+    });
+    // Jaga max 50 entry
+    if (this.missedSignals.length > 50) this.missedSignals.shift();
   }
 }
 
 function formatNumber(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  if (n >= 1_000)     return `${(n / 1_000).toFixed(1)}K`;
   return n.toFixed(0);
 }
