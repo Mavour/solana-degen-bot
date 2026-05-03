@@ -18,6 +18,10 @@ const MODULE = 'JUPITER';
 const JUPITER_QUOTE_API = 'https://quote-api.jup.ag/v6';
 const LAMPORTS_PER_SOL = 1_000_000_000;
 
+function sleep(ms: number): Promise<void> {
+  return new Promise(r => setTimeout(r, ms));
+}
+
 interface JupiterQuoteResponse {
   inputMint: string;
   outputMint: string;
@@ -53,59 +57,83 @@ export class JupiterClient {
 
   /**
    * Dapatkan quote untuk swap SOL -> Token
+   * Di dry run mode: skip Jupiter call, return mock quote
    */
   async getQuote(
     tokenMint: string,
     amountSol: number,
     slippagePct: number
   ): Promise<QuoteResult | null> {
-    const lamports = Math.floor(amountSol * LAMPORTS_PER_SOL);
-    const slippageBps = Math.floor(slippagePct * 100); // % to basis points
-
-    try {
-      logger.debug(MODULE, `Getting quote: ${amountSol} SOL -> ${tokenMint.slice(0, 8)} (${slippagePct}% slippage)`);
-
-      const response = await this.client.get<JupiterQuoteResponse>('/quote', {
-        params: {
-          inputMint: WSOL,
-          outputMint: tokenMint,
-          amount: lamports.toString(),
-          slippageBps,
-          // Prefer direct routes untuk mengurangi price impact
-          maxAccounts: 20,
-          onlyDirectRoutes: false,
-          asLegacyTransaction: false,
-        },
-      });
-
-      const q = response.data;
-      const priceImpact = parseFloat(q.priceImpactPct);
-
-      logger.debug(MODULE, `Quote received`, {
-        inAmount: `${amountSol} SOL`,
-        outAmount: q.outAmount,
-        priceImpact: `${priceImpact.toFixed(3)}%`,
-        slippage: `${slippagePct}%`,
-      });
-
+    // ── DRY RUN: skip Jupiter, return mock quote ──────────────
+    if (config.dryRun) {
+      logger.debug(MODULE, `[DRY RUN] Mock quote for ${tokenMint.slice(0, 8)}`);
+      const lamports = Math.floor(amountSol * LAMPORTS_PER_SOL);
       return {
-        inputMint: q.inputMint,
-        outputMint: q.outputMint,
-        inAmount: BigInt(q.inAmount),
-        outAmount: BigInt(q.outAmount),
-        priceImpactPct: priceImpact,
-        slippageBps,
-        routePlan: q.routePlan,
-        rawQuote: q,
+        inputMint: WSOL,
+        outputMint: tokenMint,
+        inAmount: BigInt(lamports),
+        outAmount: BigInt(lamports * 1000000), // mock token amount
+        priceImpactPct: 0.1,
+        slippageBps: Math.floor(slippagePct * 100),
+        routePlan: [],
+        rawQuote: { mock: true },
       };
-    } catch (err) {
-      if (axios.isAxiosError(err)) {
-        logger.error(MODULE, `Quote API error: ${err.response?.status} ${err.response?.statusText}`);
-      } else {
-        logger.error(MODULE, 'Quote failed', err);
-      }
-      return null;
     }
+    // ─────────────────────────────────────────────────────────
+
+    const lamports = Math.floor(amountSol * LAMPORTS_PER_SOL);
+    const slippageBps = Math.floor(slippagePct * 100);
+
+    // Retry 2x dengan delay
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        logger.debug(MODULE, `Quote attempt ${attempt}: ${amountSol} SOL -> ${tokenMint.slice(0, 8)}`);
+
+        const response = await this.client.get<JupiterQuoteResponse>('/quote', {
+          params: {
+            inputMint: WSOL,
+            outputMint: tokenMint,
+            amount: lamports.toString(),
+            slippageBps,
+            maxAccounts: 20,
+            onlyDirectRoutes: false,
+            asLegacyTransaction: false,
+          },
+        });
+
+        const q = response.data;
+        const priceImpact = parseFloat(q.priceImpactPct);
+
+        logger.debug(MODULE, `Quote OK | impact:${priceImpact.toFixed(3)}% slippage:${slippagePct}%`);
+
+        return {
+          inputMint: q.inputMint,
+          outputMint: q.outputMint,
+          inAmount: BigInt(q.inAmount),
+          outAmount: BigInt(q.outAmount),
+          priceImpactPct: priceImpact,
+          slippageBps,
+          routePlan: q.routePlan,
+          rawQuote: q,
+        };
+      } catch (err) {
+        if (axios.isAxiosError(err)) {
+          const status = err.response?.status ?? 'no-response';
+          const msg    = err.response?.data?.error ?? err.message ?? 'unknown';
+          const code   = err.code ?? '';
+          logger.error(MODULE, `Quote API error (attempt ${attempt}): HTTP ${status} | ${code} | ${msg}`);
+
+          // 400 = token tidak ada di Jupiter, tidak perlu retry
+          if (err.response?.status === 400) return null;
+        } else {
+          logger.error(MODULE, `Quote error (attempt ${attempt}): ${String(err)}`);
+        }
+
+        if (attempt < 2) await sleep(1500);
+      }
+    }
+
+    return null;
   }
 
   /**
