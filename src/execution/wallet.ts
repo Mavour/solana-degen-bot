@@ -83,14 +83,15 @@ export class WalletManager {
         'https://api.coingecko.com/api/v3/simple/price',
         {
           params: { ids: 'solana', vs_currencies: 'usd' },
-          timeout: 5000,
+          timeout: 3000, // 3 detik max — kalau timeout pakai cached value
         }
       );
       cachedSolPrice = response.data?.solana?.usd ?? cachedSolPrice;
       lastPriceFetch = now;
       logger.debug(MODULE, `SOL price: $${cachedSolPrice}`);
     } catch {
-      logger.warn(MODULE, 'Failed to fetch SOL price, using cached value');
+      // Timeout atau error — pakai cached value, jangan crash
+      logger.debug(MODULE, `SOL price fetch failed, using cached: $${cachedSolPrice}`);
     }
 
     return cachedSolPrice;

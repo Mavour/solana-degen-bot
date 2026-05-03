@@ -252,8 +252,18 @@ export class BotOrchestrator {
     }
     if (!rpcOk) throw new Error('All RPC endpoints failed');
 
-    const walletSummary = await this.walletManager.getSummary();
+    // Wallet summary — timeout guard (CoinGecko kadang lambat)
+    logger.info(MODULE, 'Fetching wallet info...');
+    const walletSummary = await Promise.race([
+      this.walletManager.getSummary(),
+      sleep(5000).then(() => '💳 Wallet loaded (price fetch timeout)'),
+    ]) as string;
+    logger.info(MODULE, 'Wallet info OK');
+
+    // Telegram launch
+    logger.info(MODULE, 'Launching Telegram bot...');
     await this.telegramBot.launch();
+    logger.info(MODULE, 'Telegram bot OK');
 
     await this.telegramBot.sendMessage(
       `🚀 *VANGUARD-01 Online*\n\n` +
