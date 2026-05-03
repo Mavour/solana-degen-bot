@@ -1,6 +1,6 @@
 // src/scanner/dexscreener.ts
-// DexScreener API — Free fallback scanner when GMGN is unavailable
-// Docs: https://docs.dexscreener.com/api/reference
+// DexScreener API v2 — Free fallback scanner
+// Docs: https://docs.dexscreener.com
 
 import axios, { AxiosInstance } from 'axios';
 import { config } from '../config';
@@ -8,326 +8,221 @@ import { logger } from '../utils/logger';
 import { TokenInfo, OHLCVCandle } from '../utils/types';
 
 const MODULE = 'DEXSCREENER';
-const BASE_URL = 'https://api.dexscreener.com';
-
-// ── DexScreener API response types ───────────────────────────
 
 interface DSPair {
   chainId: string;
   dexId: string;
   url: string;
   pairAddress: string;
-  baseToken: {
-    address: string;
-    name: string;
-    symbol: string;
-  };
-  quoteToken: {
-    address: string;
-    symbol: string;
-  };
+  baseToken: { address: string; name: string; symbol: string };
+  quoteToken: { address: string; symbol: string };
   priceNative: string;
   priceUsd: string;
-  txns: {
-    m5:  { buys: number; sells: number };
-    h1:  { buys: number; sells: number };
-    h6:  { buys: number; sells: number };
-    h24: { buys: number; sells: number };
-  };
-  volume: {
-    h24: number;
-    h6: number;
-    h1: number;
-    m5: number;
-  };
-  priceChange: {
-    m5: number;
-    h1: number;
-    h6: number;
-    h24: number;
-  };
-  liquidity?: {
-    usd: number;
-    base: number;
-    quote: number;
-  };
+  txns: { m5: any; h1: any; h6: any; h24: any };
+  volume: { h24: number; h6: number; h1: number; m5: number };
+  priceChange: { m5: number; h1: number; h6: number; h24: number };
+  liquidity?: { usd: number; base: number; quote: number };
   fdv?: number;
   marketCap?: number;
-  pairCreatedAt?: number;   // Unix ms
-  info?: {
-    imageUrl?: string;
-    websites?: Array<{ url: string }>;
-    socials?: Array<{ type: string; url: string }>;
-  };
+  pairCreatedAt?: number;
   boosts?: { active: number };
 }
-
-interface DSTokenProfileResponse {
-  pairs: DSPair[];
-}
-
-interface DSSearchResponse {
-  pairs: DSPair[];
-}
-
-interface DSLatestTokensResponse {
-  pairs: DSPair[];
-}
-
-// ── Helper ────────────────────────────────────────────────────
-
-/**
- * Convert DexScreener pair data to OHLCV candles (synthetic from price change %)
- * DS doesn't have a free OHLCV endpoint, so we build synthetic candles from
- * multi-timeframe snapshot data. Good enough for EMA/RSI on slow-moving tokens.
- */
-function buildSyntheticOHLCV(pair: DSPair, currentPriceUsd: number): OHLCVCandle[] {
-  const now = Math.floor(Date.now() / 1000);
-  const candles: OHLCVCandle[] = [];
-
-  // Reconstruct approximate price path from priceChange snapshots
-  // We work backwards: current → 1h ago → 6h ago → 24h ago
-  const pc = pair.priceChange;
-  const vol = pair.volume;
-
-  const price1hAgo  = currentPriceUsd / (1 + (pc.h1  ?? 0) / 100);
-  const price6hAgo  = currentPriceUsd / (1 + (pc.h6  ?? 0) / 100);
-  const price24hAgo = currentPriceUsd / (1 + (pc.h24 ?? 0) / 100);
-
-  // Build 5-min candles — interpolate between anchor points
-  // Segments: 24h→6h (18h), 6h→1h (5h), 1h→now (1h) = 288 × 5min candles
-  const anchors = [
-    { ts: now - 86400, price: price24hAgo, vol: vol.h24 / 288 },
-    { ts: now - 21600, price: price6hAgo,  vol: vol.h6  / 72  },
-    { ts: now - 3600,  price: price1hAgo,  vol: vol.h1  / 12  },
-    { ts: now,         price: currentPriceUsd, vol: vol.m5 / 1 },
-  ];
-
-  for (let seg = 0; seg < anchors.length - 1; seg++) {
-    const start = anchors[seg];
-    const end   = anchors[seg + 1];
-    const steps = Math.round((end.ts - start.ts) / 300); // 5-min intervals
-
-    for (let i = 0; i < steps; i++) {
-      const t = i / steps;
-      // Lerp price with small noise to make indicators non-trivial
-      const noise = 1 + (Math.random() - 0.5) * 0.005;
-      const close = (start.price + (end.price - start.price) * t) * noise;
-      const spread = close * 0.003;
-
-      candles.push({
-        timestamp: start.ts + i * 300,
-        open:  close - spread * 0.5,
-        high:  close + spread,
-        low:   close - spread,
-        close,
-        volume: (start.vol + end.vol) / 2,
-      });
-    }
-  }
-
-  return candles;
-}
-
-// ── DexScreener Scanner class ─────────────────────────────────
 
 export class DexScreenerScanner {
   private client: AxiosInstance;
 
   constructor() {
     this.client = axios.create({
-      baseURL: BASE_URL,
+      baseURL: 'https://api.dexscreener.com',
       timeout: 15000,
       headers: {
         'User-Agent': 'Mozilla/5.0 (compatible; DegenBot/1.0)',
         'Accept': 'application/json',
       },
     });
-
-    this.client.interceptors.response.use(
-      (res) => res,
-      (err) => {
-        const status = err.response?.status;
-        logger.warn(MODULE, `API error ${status}: ${err.config?.url}`);
-        return Promise.reject(err);
-      }
-    );
   }
 
   /**
-   * Fetch latest/boosted tokens on Solana from DexScreener
-   * Endpoint: GET /token-profiles/latest/v1  (free, no auth)
-   */
-  async fetchLatestTokens(): Promise<DSPair[]> {
-    try {
-      // Latest new tokens
-      const latestRes = await this.client.get<DSLatestTokensResponse>(
-        '/token-profiles/latest/v1'
-      );
-
-      // Filter Solana only
-      const solanaPairs = (latestRes.data?.pairs ?? []).filter(
-        (p) => p.chainId === 'solana'
-      );
-
-      logger.info(MODULE, `DexScreener: ${solanaPairs.length} latest Solana pairs`);
-      return solanaPairs;
-    } catch (err) {
-      logger.warn(MODULE, 'fetchLatestTokens failed', err);
-      return [];
-    }
-  }
-
-  /**
-   * Search trending Solana tokens — uses the free search endpoint
-   * We search by volume proxy: popular meme keywords
+   * Fetch trending/boosted Solana tokens — free endpoints
    */
   async fetchTrendingSolana(): Promise<DSPair[]> {
-    // DexScreener boosted/trending endpoint (free)
-    try {
-      const [boostedRes, newTokensRes] = await Promise.allSettled([
-        this.client.get<{ pairs: DSPair[] }>('/token-boosts/top/v1'),
-        this.client.get<{ pairs: DSPair[] }>('/token-boosts/latest/v1'),
-      ]);
+    const pairs: DSPair[] = [];
 
-      const pairs: DSPair[] = [];
+    // Coba beberapa endpoint gratis DS
+    const endpoints = [
+      '/token-boosts/top/v1',
+      '/token-boosts/latest/v1',
+      '/token-profiles/latest/v1',
+    ];
 
-      if (boostedRes.status === 'fulfilled') {
-        const solPairs = (boostedRes.value.data?.pairs ?? []).filter(
-          (p) => p.chainId === 'solana'
+    for (const ep of endpoints) {
+      try {
+        const res = await this.client.get(ep);
+        // DS v2 response bisa array langsung atau {pairs:[]}
+        const raw: any[] = Array.isArray(res.data)
+          ? res.data
+          : (res.data?.pairs ?? []);
+
+        const solPairs = raw.filter((p: any) =>
+          p.chainId === 'solana' || p.chain === 'solana'
         );
+
         pairs.push(...solPairs);
+        logger.debug(MODULE, `${ep}: ${solPairs.length} Solana pairs`);
+      } catch (err) {
+        logger.debug(MODULE, `DS endpoint ${ep} failed`);
       }
-
-      if (newTokensRes.status === 'fulfilled') {
-        const solPairs = (newTokensRes.value.data?.pairs ?? []).filter(
-          (p) => p.chainId === 'solana'
-        );
-        pairs.push(...solPairs);
-      }
-
-      // Deduplicate by pairAddress
-      const seen = new Set<string>();
-      const unique = pairs.filter((p) => {
-        if (seen.has(p.pairAddress)) return false;
-        seen.add(p.pairAddress);
-        return true;
-      });
-
-      logger.info(MODULE, `DexScreener trending: ${unique.length} unique Solana pairs`);
-      return unique;
-    } catch (err) {
-      logger.warn(MODULE, 'fetchTrendingSolana failed', err);
-      return [];
+      await sleep(300);
     }
+
+    // Deduplicate by pairAddress
+    const seen = new Set<string>();
+    const unique = pairs.filter(p => {
+      const key = p.pairAddress || p.baseToken?.address;
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    logger.info(MODULE, `DexScreener: ${unique.length} unique Solana pairs`);
+    return unique;
   }
 
   /**
-   * Fetch token pairs by mint address (free, up to 30 addresses per call)
+   * Search token pairs by address
    */
   async fetchTokensByAddress(addresses: string[]): Promise<DSPair[]> {
     if (!addresses.length) return [];
 
-    // DS allows comma-separated, max 30
     const chunks = chunkArray(addresses, 30);
     const results: DSPair[] = [];
 
     for (const chunk of chunks) {
       try {
-        const res = await this.client.get<DSTokenProfileResponse>(
-          `/tokens/v1/solana/${chunk.join(',')}`
-        );
-        results.push(...(res.data?.pairs ?? []));
-      } catch (err) {
-        logger.warn(MODULE, `fetchTokensByAddress chunk failed`, err);
+        // DS v2 tokens endpoint
+        const res = await this.client.get(`/tokens/v1/solana/${chunk.join(',')}`);
+        const pairs: DSPair[] = res.data?.pairs ?? (Array.isArray(res.data) ? res.data : []);
+        results.push(...pairs);
+      } catch {
+        // Try legacy endpoint
+        try {
+          const res = await this.client.get(`/dex/tokens/${chunk.join(',')}`);
+          results.push(...(res.data?.pairs ?? []));
+        } catch {
+          logger.warn(MODULE, `fetchTokensByAddress failed for chunk`);
+        }
       }
-      await sleep(200); // be polite to free API
+      await sleep(300);
     }
 
     return results;
   }
 
   /**
-   * Filter pairs berdasarkan kriteria Obicle — same logic as GMGN scanner
+   * Filter pairs — kriteria Obicle
    */
   filterPairs(pairs: DSPair[]): DSPair[] {
     const now = Date.now();
 
-    return pairs.filter((pair) => {
-      // Must have quote in SOL/WSOL
-      const isSOLPair =
-        pair.quoteToken.symbol === 'SOL' ||
-        pair.quoteToken.symbol === 'WSOL' ||
-        pair.quoteToken.address === 'So11111111111111111111111111111111111111112';
+    return pairs.filter(pair => {
+      // SOL pair only
+      const isSOL = ['SOL', 'WSOL', 'USDC'].includes(pair.quoteToken?.symbol ?? '');
 
-      if (!isSOLPair) return false;
-
-      // Age filter: > 1 jam (pairCreatedAt is in ms)
+      // Age > 1 jam
       const ageMs = pair.pairCreatedAt ? now - pair.pairCreatedAt : 0;
-      const ageSeconds = ageMs / 1000;
-      if (ageSeconds < config.trading.minTokenAgeSeconds) {
-        logger.debug(MODULE, `Skip ${pair.baseToken.symbol}: too young (${Math.floor(ageSeconds / 60)}m)`);
-        return false;
-      }
+      if (ageMs > 0 && ageMs < config.trading.minTokenAgeSeconds * 1000) return false;
 
-      // Mcap filter
+      // MCap (relaxed: $100K kalau data mcap kosong)
       const mcap = pair.marketCap ?? pair.fdv ?? 0;
-      if (mcap < config.trading.minMcapUsd) {
-        logger.debug(MODULE, `Skip ${pair.baseToken.symbol}: mcap $${mcap?.toFixed(0)} < $${config.trading.minMcapUsd}`);
-        return false;
-      }
+      if (mcap > 0 && mcap < config.trading.minMcapUsd) return false;
 
-      // Liquidity filter
-      const liquidity = pair.liquidity?.usd ?? 0;
-      if (liquidity < 5000) {
-        logger.debug(MODULE, `Skip ${pair.baseToken.symbol}: liquidity $${liquidity} too low`);
-        return false;
-      }
-
-      // Volume sanity (proxy for fee integrity)
-      const volumeToMcap = (pair.volume?.h24 ?? 0) / (mcap || 1);
-      if (volumeToMcap < 0.005) {
-        logger.debug(MODULE, `Skip ${pair.baseToken.symbol}: vol/mcap ratio ${(volumeToMcap * 100).toFixed(2)}%`);
-        return false;
-      }
+      // Liquidity minimal $3K
+      const liq = pair.liquidity?.usd ?? 0;
+      if (liq > 0 && liq < 3000) return false;
 
       return true;
     });
   }
 
   /**
-   * Convert DSPair → TokenInfo (our internal type)
+   * Build synthetic OHLCV dari price change snapshots
+   * DS free tier tidak punya OHLCV endpoint
+   */
+  private buildSyntheticOHLCV(pair: DSPair, currentPrice: number): OHLCVCandle[] {
+    const now = Math.floor(Date.now() / 1000);
+    const pc = pair.priceChange ?? {};
+    const vol = pair.volume ?? {};
+
+    // Rekonstruksi harga dari % perubahan
+    const p1h  = currentPrice / (1 + ((pc.h1  ?? 0) / 100)) || currentPrice;
+    const p6h  = currentPrice / (1 + ((pc.h6  ?? 0) / 100)) || currentPrice;
+    const p24h = currentPrice / (1 + ((pc.h24 ?? 0) / 100)) || currentPrice;
+
+    const anchors = [
+      { ts: now - 86400, price: p24h, volPerCandle: (vol.h24 ?? 0) / 288 },
+      { ts: now - 21600, price: p6h,  volPerCandle: (vol.h6  ?? 0) / 72  },
+      { ts: now - 3600,  price: p1h,  volPerCandle: (vol.h1  ?? 0) / 12  },
+      { ts: now,         price: currentPrice, volPerCandle: (vol.m5 ?? 0) },
+    ];
+
+    const candles: OHLCVCandle[] = [];
+
+    for (let seg = 0; seg < anchors.length - 1; seg++) {
+      const start = anchors[seg];
+      const end   = anchors[seg + 1];
+      const steps = Math.round((end.ts - start.ts) / 300);
+      if (steps <= 0) continue;
+
+      for (let i = 0; i < steps; i++) {
+        const t      = i / steps;
+        const noise  = 1 + (Math.random() - 0.5) * 0.004;
+        const close  = (start.price + (end.price - start.price) * t) * noise;
+        const spread = close * 0.002;
+
+        candles.push({
+          timestamp: start.ts + i * 300,
+          open:  close - spread * 0.5,
+          high:  close + spread,
+          low:   close - spread,
+          close,
+          volume: (start.volPerCandle + end.volPerCandle) / 2,
+        });
+      }
+    }
+
+    return candles;
+  }
+
+  /**
+   * Convert DSPair → TokenInfo
    */
   pairToTokenInfo(pair: DSPair): TokenInfo {
-    const now = Math.floor(Date.now() / 1000);
-    const pairCreatedSec = pair.pairCreatedAt ? pair.pairCreatedAt / 1000 : now - 7200;
-    const currentPrice = parseFloat(pair.priceUsd ?? '0');
-    const mcap = pair.marketCap ?? pair.fdv ?? 0;
-
-    // Build synthetic OHLCV for indicator calculation
-    const ohlcv = buildSyntheticOHLCV(pair, currentPrice);
+    const now  = Math.floor(Date.now() / 1000);
+    const price = parseFloat(pair.priceUsd ?? '0');
+    const mcap  = pair.marketCap ?? pair.fdv ?? 0;
+    const createdSec = pair.pairCreatedAt ? pair.pairCreatedAt / 1000 : now - 7200;
 
     return {
       address: pair.baseToken.address,
-      symbol: pair.baseToken.symbol,
-      name: pair.baseToken.name,
+      symbol:  pair.baseToken.symbol,
+      name:    pair.baseToken.name,
       mcapUsd: mcap,
       liquidityUsd: pair.liquidity?.usd ?? 0,
       volumeUsd24h: pair.volume?.h24 ?? 0,
       globalFeeSol: 0,
-      ageSeconds: now - pairCreatedSec,
-      priceUsd: currentPrice,
+      ageSeconds: now - createdSec,
+      priceUsd: price,
       priceChangePct1h: pair.priceChange?.h1 ?? 0,
-      holders: 0,  // DS doesn't provide holder count on free tier
-      ohlcv,
+      holders: 0,
+      ohlcv: this.buildSyntheticOHLCV(pair, price),
     };
   }
 
   /**
-   * Main scan entry point (mirrors GMGNScanner.scan() interface)
+   * Main scan
    */
   async scan(): Promise<TokenInfo[]> {
-    logger.info(MODULE, '🔍 DexScreener fallback scan starting...');
+    logger.info(MODULE, '🔍 DexScreener fallback scan...');
 
     const pairs = await this.fetchTrendingSolana();
     if (!pairs.length) {
@@ -338,22 +233,18 @@ export class DexScreenerScanner {
     const filtered = this.filterPairs(pairs);
     logger.info(MODULE, `${filtered.length}/${pairs.length} pairs passed filters`);
 
-    const tokens = filtered.slice(0, 10).map((p) => this.pairToTokenInfo(p));
-    logger.info(MODULE, `DexScreener scan complete: ${tokens.length} tokens ready`);
+    const tokens = filtered.slice(0, 10).map(p => this.pairToTokenInfo(p));
+    logger.info(MODULE, `DexScreener done: ${tokens.length} tokens`);
     return tokens;
   }
 }
 
-// ── Utils ─────────────────────────────────────────────────────
-
 function chunkArray<T>(arr: T[], size: number): T[][] {
-  const chunks: T[][] = [];
-  for (let i = 0; i < arr.length; i += size) {
-    chunks.push(arr.slice(i, i + size));
-  }
-  return chunks;
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
 }
 
 function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+  return new Promise(r => setTimeout(r, ms));
 }

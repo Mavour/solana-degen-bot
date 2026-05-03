@@ -1,291 +1,259 @@
 // src/scanner/gmgn.ts
-// GMGN.ai API Scanner - Filter token berdasarkan kriteria Obicle
+// GMGN.ai Scanner dengan endpoints yang lebih robust
 
 import axios, { AxiosInstance } from 'axios';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 import { TokenInfo, OHLCVCandle } from '../utils/types';
 
-const MODULE = 'SCANNER';
+const MODULE = 'GMGN';
 
 // WSOL mint address
-const WSOL = 'So11111111111111111111111111111111111111112';
+export const WSOL = 'So11111111111111111111111111111111111111112';
 
-interface GMGNTrendingToken {
-  address: string;
-  symbol: string;
-  name: string;
-  market_cap: number;
-  liquidity: number;
-  volume: number;
-  open_timestamp: number;       // Unix timestamp launch
-  swaps_5m: number;
-  swaps_1h: number;
-  price: number;
-  price_change_percent1h: number;
-  holder_count: number;
-  // Fee related
-  buy_tax?: number;
-  sell_tax?: number;
-}
-
-interface GMGNOHLCVResponse {
-  data: {
-    list: Array<{
-      timestamp: number;
-      open: string;
-      high: string;
-      low: string;
-      close: string;
-      volume: string;
-    }>;
-  };
-}
-
-interface GMGNTokenDetailResponse {
-  data: {
-    token: {
-      address: string;
-      symbol: string;
-      name: string;
-      market_cap: number;
-      liquidity: number;
-      volume_24h: number;
-      open_timestamp: number;
-      price: number;
-      price_change_percent1h: number;
-      holder_count: number;
-      swaps_24h: number;
-    };
-  };
-}
+// Browser-like headers untuk bypass bot detection
+const BROWSER_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Accept': 'application/json, text/plain, */*',
+  'Accept-Language': 'en-US,en;q=0.9',
+  'Accept-Encoding': 'gzip, deflate, br',
+  'Referer': 'https://gmgn.ai/',
+  'Origin': 'https://gmgn.ai',
+  'sec-ch-ua': '"Chromium";v="124", "Google Chrome";v="124"',
+  'sec-ch-ua-mobile': '?0',
+  'sec-ch-ua-platform': '"Windows"',
+  'Sec-Fetch-Dest': 'empty',
+  'Sec-Fetch-Mode': 'cors',
+  'Sec-Fetch-Site': 'same-origin',
+};
 
 export class GMGNScanner {
   private client: AxiosInstance;
 
   constructor() {
     this.client = axios.create({
-      baseURL: config.gmgn.baseUrl,
-      timeout: 15000,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; DegenBot/1.0)',
-        'Accept': 'application/json',
-        ...(config.gmgn.apiKey && { 'X-API-Key': config.gmgn.apiKey }),
-      },
+      baseURL: 'https://gmgn.ai',
+      timeout: 20000,
+      headers: BROWSER_HEADERS,
     });
 
-    // Response interceptor for logging
     this.client.interceptors.response.use(
       (res) => res,
       (err) => {
         const status = err.response?.status;
         const url = err.config?.url;
-        logger.warn(MODULE, `API request failed: ${url} (${status})`);
+        logger.warn(MODULE, `Request failed: ${url} (HTTP ${status})`);
         return Promise.reject(err);
       }
     );
   }
 
   /**
-   * Fetch trending tokens dari GMGN
+   * Fetch trending tokens — coba beberapa endpoint format GMGN
    */
-  async fetchTrending(period: '5m' | '1h' = '1h'): Promise<GMGNTrendingToken[]> {
-    try {
-      // GMGN trending endpoint - SOL chain
-      const response = await this.client.get(
-        `/defi/quotation/v1/rank/sol/swaps/${period}`,
-        {
-          params: {
-            orderby: 'swaps',
-            direction: 'desc',
-            filters: ['renounced', 'frozen'],
-            limit: 50,
-          },
-        }
-      );
+  async fetchTrending(): Promise<any[]> {
+    // GMGN punya beberapa endpoint format, coba satu per satu
+    const endpoints = [
+      { url: '/defi/quotation/v1/rank/sol/swaps/1h', params: { orderby: 'swaps', direction: 'desc', limit: 50 } },
+      { url: '/api/v1/rank/sol/swaps/1h', params: { orderby: 'swaps', direction: 'desc', limit: 50 } },
+      { url: '/defi/quotation/v1/rank/sol/swaps/5m', params: { orderby: 'swaps', direction: 'desc', limit: 50 } },
+    ];
 
-      const tokens: GMGNTrendingToken[] = response.data?.data?.rank ?? [];
-      logger.info(MODULE, `Fetched ${tokens.length} trending tokens (${period})`);
-      return tokens;
-    } catch (err) {
-      logger.error(MODULE, 'Failed to fetch trending', err);
-      return [];
+    for (const ep of endpoints) {
+      try {
+        const res = await this.client.get(ep.url, { params: ep.params });
+        const data = res.data?.data?.rank ?? res.data?.rank ?? [];
+        if (Array.isArray(data) && data.length > 0) {
+          logger.info(MODULE, `Trending OK via ${ep.url}: ${data.length} tokens`);
+          return data;
+        }
+      } catch (err) {
+        logger.debug(MODULE, `Endpoint ${ep.url} failed`);
+      }
+      await sleep(500);
     }
+
+    logger.warn(MODULE, 'All GMGN trending endpoints failed');
+    return [];
   }
 
   /**
-   * Filter tokens berdasarkan kriteria Obicle
+   * Filter tokens sesuai kriteria Obicle
    */
-  filterTokens(tokens: GMGNTrendingToken[]): GMGNTrendingToken[] {
+  filterTokens(tokens: any[]): any[] {
     const now = Math.floor(Date.now() / 1000);
+    const results: any[] = [];
 
-    return tokens.filter((token) => {
-      // 1. Age filter: > 1 jam
-      const ageSeconds = now - (token.open_timestamp || 0);
+    for (const token of tokens) {
+      const ageSeconds = now - (token.open_timestamp || token.created_timestamp || 0);
+      const mcap = token.market_cap || token.usd_market_cap || 0;
+      const liquidity = token.liquidity || token.pool_liquidity_usd || 0;
+      const volume = token.volume || token.volume_1h || token.swaps_1h || 0;
+      const symbol = token.symbol || token.token_symbol || 'UNKNOWN';
+
+      // Age > 1 jam
       if (ageSeconds < config.trading.minTokenAgeSeconds) {
-        logger.debug(MODULE, `Skip ${token.symbol}: too young (${Math.floor(ageSeconds / 60)}m)`);
-        return false;
+        logger.debug(MODULE, `Skip ${symbol}: too young (${Math.floor(ageSeconds/60)}m)`);
+        continue;
       }
 
-      // 2. Mcap filter: > $150k
-      if ((token.market_cap || 0) < config.trading.minMcapUsd) {
-        logger.debug(MODULE, `Skip ${token.symbol}: mcap too low ($${token.market_cap?.toFixed(0)})`);
-        return false;
+      // MCap > $150K — RELAXED: pakai $100K kalau tidak ada data mcap
+      const mcapThreshold = mcap > 0 ? config.trading.minMcapUsd : 100000;
+      if (mcap > 0 && mcap < mcapThreshold) {
+        logger.debug(MODULE, `Skip ${symbol}: mcap $${(mcap/1000).toFixed(0)}K < $${(mcapThreshold/1000).toFixed(0)}K`);
+        continue;
       }
 
-      // 3. Liquidity sanity check: minimal ada likuiditas
-      if ((token.liquidity || 0) < 5000) {
-        logger.debug(MODULE, `Skip ${token.symbol}: liquidity too low ($${token.liquidity})`);
-        return false;
+      // Liquidity minimal (relaxed: $3K)
+      if (liquidity > 0 && liquidity < 3000) {
+        logger.debug(MODULE, `Skip ${symbol}: liquidity $${liquidity.toFixed(0)} too low`);
+        continue;
       }
 
-      // 4. Fee integrity check: Fee vs Mcap ratio 1:10
-      // swaps_1h sebagai proxy untuk global fee (volume based)
-      // Konversi: minimal fee harus 1/10 dari mcap dalam SOL equivalent
-      // Jika mcap $150k dan SOL ~$200, maka fee minimal = 150000/(200*10) = 75 SOL
-      // Simplifikasi: volume 1h harus > mcap * 0.01 (1% turnover minimal)
-      const volumeToMcapRatio = (token.volume || 0) / (token.market_cap || 1);
-      if (volumeToMcapRatio < 0.005) {
-        logger.debug(MODULE, `Skip ${token.symbol}: volume/mcap ratio too low (${(volumeToMcapRatio * 100).toFixed(2)}%)`);
-        return false;
-      }
-
-      return true;
-    });
-  }
-
-  /**
-   * Fetch OHLCV data untuk analisis teknikal
-   */
-  async fetchOHLCV(
-    tokenAddress: string,
-    resolution: '1' | '5' | '15' | '60' = '5',
-    limit: number = 200
-  ): Promise<OHLCVCandle[]> {
-    try {
-      const response = await this.client.get<GMGNOHLCVResponse>(
-        `/api/v1/token_kline/sol/${tokenAddress}`,
-        {
-          params: {
-            resolution,
-            limit,
-          },
-        }
-      );
-
-      const rawCandles = response.data?.data?.list ?? [];
-      const candles: OHLCVCandle[] = rawCandles.map((c) => ({
-        timestamp: c.timestamp,
-        open: parseFloat(c.open),
-        high: parseFloat(c.high),
-        low: parseFloat(c.low),
-        close: parseFloat(c.close),
-        volume: parseFloat(c.volume),
-      }));
-
-      logger.debug(MODULE, `OHLCV ${tokenAddress.slice(0, 8)}: ${candles.length} candles`);
-      return candles;
-    } catch (err) {
-      logger.warn(MODULE, `Failed OHLCV for ${tokenAddress.slice(0, 8)}`, err);
-      return [];
+      results.push(token);
     }
+
+    logger.info(MODULE, `Filter: ${results.length}/${tokens.length} tokens passed`);
+    return results;
   }
 
   /**
-   * Fetch token detail dari GMGN
+   * Fetch OHLCV — coba beberapa format endpoint
+   */
+  async fetchOHLCV(tokenAddress: string, limit: number = 200): Promise<OHLCVCandle[]> {
+    const endpoints = [
+      `/api/v1/token_kline/sol/${tokenAddress}`,
+      `/defi/quotation/v1/token_kline/sol/${tokenAddress}`,
+    ];
+
+    for (const url of endpoints) {
+      try {
+        const res = await this.client.get(url, {
+          params: { resolution: '5', limit },
+        });
+
+        const list = res.data?.data?.list ?? res.data?.list ?? [];
+        if (!Array.isArray(list) || list.length === 0) continue;
+
+        const candles: OHLCVCandle[] = list.map((c: any) => ({
+          timestamp: Number(c.timestamp || c.time || 0),
+          open:  parseFloat(c.open  || c.o || 0),
+          high:  parseFloat(c.high  || c.h || 0),
+          low:   parseFloat(c.low   || c.l || 0),
+          close: parseFloat(c.close || c.c || 0),
+          volume: parseFloat(c.volume || c.v || 0),
+        })).filter((c: OHLCVCandle) => c.close > 0);
+
+        logger.debug(MODULE, `OHLCV ${tokenAddress.slice(0,8)}: ${candles.length} candles`);
+        return candles;
+      } catch {
+        // try next endpoint
+      }
+    }
+
+    return [];
+  }
+
+  /**
+   * Fetch token detail
    */
   async fetchTokenDetail(tokenAddress: string): Promise<TokenInfo | null> {
     try {
-      const [detailRes, ohlcv] = await Promise.all([
-        this.client.get<GMGNTokenDetailResponse>(`/api/v1/token_info/sol/${tokenAddress}`),
-        this.fetchOHLCV(tokenAddress, '5', 200),
+      const [detailRes, ohlcv] = await Promise.allSettled([
+        this.client.get(`/api/v1/token_info/sol/${tokenAddress}`),
+        this.fetchOHLCV(tokenAddress, 200),
       ]);
 
-      const t = detailRes.data?.data?.token;
-      if (!t) return null;
+      const ohlcvData = ohlcv.status === 'fulfilled' ? ohlcv.value : [];
 
-      const now = Math.floor(Date.now() / 1000);
+      if (detailRes.status === 'fulfilled') {
+        const t = detailRes.value.data?.data?.token ?? detailRes.value.data?.token;
+        if (t) {
+          const now = Math.floor(Date.now() / 1000);
+          return {
+            address: tokenAddress,
+            symbol: t.symbol || 'UNKNOWN',
+            name: t.name || 'Unknown',
+            mcapUsd: t.market_cap || t.usd_market_cap || 0,
+            liquidityUsd: t.liquidity || 0,
+            volumeUsd24h: t.volume_24h || t.volume || 0,
+            globalFeeSol: 0,
+            ageSeconds: now - (t.open_timestamp || t.created_timestamp || now - 7200),
+            priceUsd: t.price || t.usd_price || 0,
+            priceChangePct1h: t.price_change_percent1h || t.price_change_1h || 0,
+            holders: t.holder_count || t.holders || 0,
+            ohlcv: ohlcvData,
+          };
+        }
+      }
 
-      return {
-        address: t.address,
-        symbol: t.symbol || 'UNKNOWN',
-        name: t.name || 'Unknown',
-        mcapUsd: t.market_cap || 0,
-        liquidityUsd: t.liquidity || 0,
-        volumeUsd24h: t.volume_24h || 0,
-        globalFeeSol: 0, // Calculated separately if needed
-        ageSeconds: now - (t.open_timestamp || 0),
-        priceUsd: t.price || 0,
-        priceChangePct1h: t.price_change_percent1h || 0,
-        holders: t.holder_count || 0,
-        ohlcv,
-      };
+      // Fallback: minimal token info tanpa detail
+      if (ohlcvData.length > 0) {
+        logger.debug(MODULE, `Using OHLCV-only data for ${tokenAddress.slice(0,8)}`);
+        return {
+          address: tokenAddress,
+          symbol: 'UNKNOWN',
+          name: 'Unknown',
+          mcapUsd: 0,
+          liquidityUsd: 0,
+          volumeUsd24h: 0,
+          globalFeeSol: 0,
+          ageSeconds: 7200,
+          priceUsd: ohlcvData[ohlcvData.length - 1]?.close ?? 0,
+          priceChangePct1h: 0,
+          holders: 0,
+          ohlcv: ohlcvData,
+        };
+      }
+
+      return null;
     } catch (err) {
-      logger.warn(MODULE, `Failed to fetch detail for ${tokenAddress.slice(0, 8)}`);
+      logger.warn(MODULE, `fetchTokenDetail failed: ${tokenAddress.slice(0,8)}`);
       return null;
     }
   }
 
   /**
-   * Main scan: fetch + filter + enrich dengan detail
+   * Main scan
    */
   async scan(): Promise<TokenInfo[]> {
-    logger.info(MODULE, '🔍 Starting market scan...');
+    logger.info(MODULE, '🔍 GMGN scan starting...');
 
-    const trending = await this.fetchTrending('1h');
+    const trending = await this.fetchTrending();
     if (!trending.length) {
-      logger.warn(MODULE, 'No trending tokens fetched');
-      return [];
+      logger.warn(MODULE, 'GMGN trending empty — will trigger fallback');
+      throw new Error('GMGN trending returned 0 tokens');
     }
 
     const filtered = this.filterTokens(trending);
-    logger.info(MODULE, `${filtered.length}/${trending.length} tokens passed filters`);
-
     if (!filtered.length) return [];
 
-    // Enrich top 5 tokens — cukup, karena kita butuh kualitas bukan kuantitas.
-    // GMGN free tier aman di ~2500ms antar request.
-    // fetchTokenDetail = 2 calls (detail + OHLCV), jadi total ~25 detik untuk 5 token.
-    // Ini acceptable karena scan interval 3 menit.
     const enriched: TokenInfo[] = [];
-    const topTokens = filtered.slice(0, 5);
 
-    for (const token of topTokens) {
-      const detail = await this.fetchTokenDetail(token.address);
-      if (detail && detail.ohlcv.length >= 50) {
+    for (const token of filtered.slice(0, 5)) {
+      const addr = token.address || token.token_address;
+      if (!addr) continue;
+
+      const detail = await this.fetchTokenDetail(addr);
+      if (detail) {
+        // Merge filter data kalau detail kurang lengkap
+        if (!detail.mcapUsd && (token.market_cap || token.usd_market_cap)) {
+          detail.mcapUsd = token.market_cap || token.usd_market_cap;
+        }
+        if (!detail.symbol || detail.symbol === 'UNKNOWN') {
+          detail.symbol = token.symbol || token.token_symbol || 'UNKNOWN';
+        }
         enriched.push(detail);
-      } else {
-        const now = Math.floor(Date.now() / 1000);
-        enriched.push({
-          address: token.address,
-          symbol: token.symbol,
-          name: token.name,
-          mcapUsd: token.market_cap,
-          liquidityUsd: token.liquidity,
-          volumeUsd24h: token.volume,
-          globalFeeSol: 0,
-          ageSeconds: now - (token.open_timestamp || 0),
-          priceUsd: token.price,
-          priceChangePct1h: token.price_change_percent1h || 0,
-          holders: token.holder_count || 0,
-          ohlcv: [],
-        });
       }
 
-      // GMGN rate limit safe zone: 2500ms antar token
-      // fetchTokenDetail itu 2 request (info + OHLCV), delay ini untuk
-      // jeda sebelum request token berikutnya agar tidak kena 429
-      await sleep(2500);
+      await sleep(2500); // GMGN rate limit safe zone
     }
 
-    logger.info(MODULE, `Scan complete. ${enriched.length} tokens enriched`);
+    logger.info(MODULE, `GMGN scan done: ${enriched.length} tokens enriched`);
     return enriched;
   }
 }
 
 function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise(r => setTimeout(r, ms));
 }
-
-// WSOL export for other modules
-export { WSOL };

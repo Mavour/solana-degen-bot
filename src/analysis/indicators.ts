@@ -23,9 +23,11 @@ const STOCH_RSI_CONFIG = {
 };
 
 // Threshold: RSI bottoming jika di bawah nilai ini
-const RSI_BOTTOMING_THRESHOLD = 20;
+// Relaxed dari 20 ke 25 — lebih banyak signal, tetap reasonable
+const RSI_BOTTOMING_THRESHOLD = parseInt(process.env.RSI_BOTTOMING_THRESHOLD ?? '25');
 // EMA touch tolerance: harga dalam X% dari EMA dianggap "touching"
-const EMA_TOUCH_TOLERANCE_PCT = 1.5;
+// Relaxed dari 1.5% ke 2.5% — meme coin lebih volatile
+const EMA_TOUCH_TOLERANCE_PCT = parseFloat(process.env.EMA_TOUCH_TOLERANCE_PCT ?? '2.5');
 
 interface EMASeries {
   period: EMAPeriod;
@@ -167,8 +169,8 @@ export function calculateDynamicSlippage(volatility: number): number {
  * Main analysis: generate signal untuk satu token
  */
 export function analyzeToken(token: TokenInfo): SignalResult | null {
-  if (token.ohlcv.length < 50) {
-    logger.debug(MODULE, `${token.symbol}: insufficient OHLCV (${token.ohlcv.length} candles)`);
+  if (token.ohlcv.length < 35) {
+    logger.debug(MODULE, `${token.symbol}: insufficient OHLCV (${token.ohlcv.length} candles, need 35)`);
     return null;
   }
 

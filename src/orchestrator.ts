@@ -66,6 +66,12 @@ export class BotOrchestrator {
     this.telegramBot.onApprove(async (request: ApprovalRequest) => {
       await this.executor.executeTrade(request);
     });
+
+    // Wire /scan command ke runScanCycle
+    this.telegramBot.onManualScan(async () => {
+      await this.telegramBot.sendMessage('🔍 *Scan manual dimulai...*');
+      await this.runScanCycle();
+    });
   }
 
   private setupRiskEvents(): void {
@@ -97,22 +103,51 @@ export class BotOrchestrator {
       logger.info(MODULE, `🔄 Scan | ${new Date().toLocaleTimeString()}`);
 
       const { tokens, source } = await this.scanner.scan();
+
       if (!tokens.length) {
         logger.info(MODULE, 'No tokens passed filters');
+        // Kirim info ke Telegram supaya user tau bot masih jalan
+        await this.telegramBot.sendMessage(
+          `🔄 *Scan selesai* — [${source.toUpperCase()}]\n` +
+          `📭 Tidak ada token yang lolos filter saat ini.\n` +
+          `_Filter: MCap >$${(config.trading.minMcapUsd/1000).toFixed(0)}K, Age >${config.trading.minTokenAgeSeconds/3600}h_`
+        );
         return;
       }
+
       logger.info(MODULE, `📊 [${source.toUpperCase()}] ${tokens.length} tokens`);
 
-      const signals = analyzeTokens(tokens);
-      logger.info(MODULE, `📡 ${signals.length} signal(s)`);
-      if (!signals.length) return;
+      // Log tiap token yang lolos untuk debug
+      tokens.forEach(t => {
+        logger.info(MODULE, `  ✓ ${t.symbol} | MCap:$${(t.mcapUsd/1000).toFixed(0)}K | Age:${Math.floor(t.ageSeconds/3600)}h | OHLCV:${t.ohlcv.length}`);
+      });
 
+      const signals = analyzeTokens(tokens);
+      logger.info(MODULE, `📡 ${signals.length} signal(s) dari ${tokens.length} tokens`);
+
+      if (!signals.length) {
+        // Kirim summary ke Telegram — user tau scan jalan tapi belum ada setup yang pas
+        const tokenList = tokens.slice(0, 5).map(t =>
+          `• ${t.symbol} $${(t.mcapUsd/1000).toFixed(0)}K | OHLCV:${t.ohlcv.length}`
+        ).join('\n');
+
+        await this.telegramBot.sendMessage(
+          `🔄 *Scan selesai* — [${source.toUpperCase()}]\n` +
+          `📊 ${tokens.length} token lolos filter, belum ada signal EMA+RSI.\n\n` +
+          `*Token yang discan:*\n${tokenList}\n\n` +
+          `_Signal butuh: harga di EMA + Stoch RSI < 20_`
+        );
+        return;
+      }
+
+      // Ada signal — proses
       for (const signal of signals) {
         await this.processSignal(signal);
         await sleep(500);
       }
     } catch (err) {
       logger.error(MODULE, 'Scan error', err);
+      await this.telegramBot.sendMessage(`❌ *Scan error*\n\`${String(err).slice(0, 200)}\``);
     } finally {
       this.isScanInProgress = false;
     }

@@ -38,6 +38,11 @@ export class TelegramBot {
   private missedSignals: MissedSignal[] = [];
   scannerRouter: ScannerRouter | null = null;
   dryRunExecutor: DryRunExecutor | null = null;
+  private onManualScanCallback: (() => Promise<void>) | null = null;
+
+  onManualScan(cb: () => Promise<void>): void {
+    this.onManualScanCallback = cb;
+  }
 
   constructor(riskManager: RiskManager) {
     this.bot = new Telegraf(config.telegram.botToken);
@@ -83,12 +88,29 @@ export class TelegramBot {
       );
     });
 
+    // /ping — selalu balas, buat cek apakah bot masih hidup
+    this.bot.command('ping', async (ctx) => {
+      await ctx.reply(`🏓 Pong! Bot hidup.\nUptime: ${Math.floor(process.uptime() / 60)}m`);
+    });
+
     // Slash commands
     this.bot.command('status',    async (ctx) => this.handleStatus(ctx));
     this.bot.command('positions', async (ctx) => this.handlePositions(ctx));
     this.bot.command('dryreport', async (ctx) => this.handleDryReport(ctx));
     this.bot.command('missed',    async (ctx) => this.handleMissed(ctx));
     this.bot.command('help',      async (ctx) => this.handleHelp(ctx));
+
+    // /scan — trigger scan manual tanpa nunggu cron
+    this.bot.command('scan', async (ctx) => {
+      await ctx.reply('🔍 Memulai scan manual...');
+      if (this.onManualScanCallback) {
+        this.onManualScanCallback().catch(async (err) => {
+          await this.sendMessage(`❌ Scan error: ${String(err)}`);
+        });
+      } else {
+        await ctx.reply('⚠️ Scanner belum siap.');
+      }
+    });
 
     // APPROVE / CANCEL inline button callbacks
     this.bot.action(/^APPROVE_(.+)$/, async (ctx) => {
@@ -508,8 +530,10 @@ export class TelegramBot {
         { command: 'status',     description: '📊 Status bot & scanner' },
         { command: 'positions',  description: '📂 Open positions' },
         { command: 'missed',     description: '⏭ Signal yang terlewat' },
+        { command: 'scan',       description: '🔍 Trigger scan manual' },
         { command: 'dryreport',  description: '📝 Laporan paper trading' },
         { command: 'help',       description: '❓ Panduan singkat' },
+        { command: 'ping',       description: '🏓 Cek bot masih hidup' },
       ]);
       await this.bot.launch({ allowedUpdates: ['message', 'callback_query'] });
       logger.info(MODULE, '🤖 Telegram bot launched');
