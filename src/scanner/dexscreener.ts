@@ -1,6 +1,5 @@
 // src/scanner/dexscreener.ts
-// DexScreener API v2 — Free fallback scanner
-// Docs: https://docs.dexscreener.com
+// DexScreener API — Free fallback scanner (fixed endpoint flow)
 
 import axios, { AxiosInstance } from 'axios';
 import { config } from '../config';
@@ -9,23 +8,31 @@ import { TokenInfo, OHLCVCandle } from '../utils/types';
 
 const MODULE = 'DEXSCREENER';
 
+// Boost profile (dari /token-boosts endpoints)
+interface DSBoostProfile {
+  chainId: string;
+  tokenAddress: string;
+  url?: string;
+  description?: string;
+  totalAmount?: number;
+}
+
+// Pair data (dari /tokens/v1/solana/{address})
 interface DSPair {
   chainId: string;
   dexId: string;
-  url: string;
   pairAddress: string;
   baseToken: { address: string; name: string; symbol: string };
   quoteToken: { address: string; symbol: string };
-  priceNative: string;
-  priceUsd: string;
-  txns: { m5: any; h1: any; h6: any; h24: any };
-  volume: { h24: number; h6: number; h1: number; m5: number };
-  priceChange: { m5: number; h1: number; h6: number; h24: number };
-  liquidity?: { usd: number; base: number; quote: number };
+  priceUsd?: string;
+  priceNative?: string;
+  txns?: { m5?: any; h1?: any; h6?: any; h24?: any };
+  volume?: { h24?: number; h6?: number; h1?: number; m5?: number };
+  priceChange?: { m5?: number; h1?: number; h6?: number; h24?: number };
+  liquidity?: { usd?: number; base?: number; quote?: number };
   fdv?: number;
   marketCap?: number;
   pairCreatedAt?: number;
-  boosts?: { active: number };
 }
 
 export class DexScreenerScanner {
@@ -43,53 +50,38 @@ export class DexScreenerScanner {
   }
 
   /**
-   * Fetch trending/boosted Solana tokens — free endpoints
+   * Step 1: Ambil token addresses dari boost endpoints
    */
-  async fetchTrendingSolana(): Promise<DSPair[]> {
-    const pairs: DSPair[] = [];
-
-    // Coba beberapa endpoint gratis DS
+  private async fetchBoostedAddresses(): Promise<string[]> {
     const endpoints = [
       '/token-boosts/top/v1',
       '/token-boosts/latest/v1',
-      '/token-profiles/latest/v1',
     ];
+
+    const addresses = new Set<string>();
 
     for (const ep of endpoints) {
       try {
         const res = await this.client.get(ep);
-        // DS v2 response bisa array langsung atau {pairs:[]}
-        const raw: any[] = Array.isArray(res.data)
-          ? res.data
-          : (res.data?.pairs ?? []);
+        const items: DSBoostProfile[] = Array.isArray(res.data) ? res.data : [];
 
-        const solPairs = raw.filter((p: any) =>
-          p.chainId === 'solana' || p.chain === 'solana'
-        );
+        items
+          .filter(item => item.chainId === 'solana' && item.tokenAddress)
+          .forEach(item => addresses.add(item.tokenAddress));
 
-        pairs.push(...solPairs);
-        logger.debug(MODULE, `${ep}: ${solPairs.length} Solana pairs`);
+        logger.debug(MODULE, `${ep}: ${items.filter(i => i.chainId === 'solana').length} Solana addresses`);
       } catch (err) {
-        logger.debug(MODULE, `DS endpoint ${ep} failed`);
+        logger.debug(MODULE, `${ep} failed`);
       }
       await sleep(300);
     }
 
-    // Deduplicate by pairAddress
-    const seen = new Set<string>();
-    const unique = pairs.filter(p => {
-      const key = p.pairAddress || p.baseToken?.address;
-      if (!key || seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-
-    logger.info(MODULE, `DexScreener: ${unique.length} unique Solana pairs`);
-    return unique;
+    logger.info(MODULE, `Got ${addresses.size} unique boosted token addresses`);
+    return Array.from(addresses);
   }
 
   /**
-   * Search token pairs by address
+   * Step 2: Fetch pair data untuk list of addresses
    */
   async fetchTokensByAddress(addresses: string[]): Promise<DSPair[]> {
     if (!addresses.length) return [];
@@ -99,20 +91,18 @@ export class DexScreenerScanner {
 
     for (const chunk of chunks) {
       try {
-        // DS v2 tokens endpoint
         const res = await this.client.get(`/tokens/v1/solana/${chunk.join(',')}`);
-        const pairs: DSPair[] = res.data?.pairs ?? (Array.isArray(res.data) ? res.data : []);
+        // Response bisa array of pairs langsung
+        const pairs: DSPair[] = Array.isArray(res.data)
+          ? res.data
+          : (res.data?.pairs ?? []);
+
         results.push(...pairs);
-      } catch {
-        // Try legacy endpoint
-        try {
-          const res = await this.client.get(`/dex/tokens/${chunk.join(',')}`);
-          results.push(...(res.data?.pairs ?? []));
-        } catch {
-          logger.warn(MODULE, `fetchTokensByAddress failed for chunk`);
-        }
+        logger.debug(MODULE, `Fetched ${pairs.length} pairs for ${chunk.length} addresses`);
+      } catch (err) {
+        logger.warn(MODULE, `fetchTokensByAddress chunk failed`);
       }
-      await sleep(300);
+      await sleep(500);
     }
 
     return results;
@@ -123,73 +113,88 @@ export class DexScreenerScanner {
    */
   filterPairs(pairs: DSPair[]): DSPair[] {
     const now = Date.now();
+    const passed: DSPair[] = [];
 
-    return pairs.filter(pair => {
-      // SOL pair only
-      const isSOL = ['SOL', 'WSOL', 'USDC'].includes(pair.quoteToken?.symbol ?? '');
+    for (const pair of pairs) {
+      const symbol = pair.baseToken?.symbol ?? 'UNKNOWN';
 
-      // Age > 1 jam
-      const ageMs = pair.pairCreatedAt ? now - pair.pairCreatedAt : 0;
-      if (ageMs > 0 && ageMs < config.trading.minTokenAgeSeconds * 1000) return false;
+      // Harus SOL/WSOL/USDC quote
+      const quoteSymbol = pair.quoteToken?.symbol ?? '';
+      if (!['SOL', 'WSOL', 'USDC', 'USDT'].includes(quoteSymbol)) continue;
 
-      // MCap (relaxed: $100K kalau data mcap kosong)
+      // Age > threshold (kalau tidak ada data createdAt, loloskan saja)
+      if (pair.pairCreatedAt) {
+        const ageMs = now - pair.pairCreatedAt;
+        if (ageMs < config.trading.minTokenAgeSeconds * 1000) {
+          logger.debug(MODULE, `Skip ${symbol}: too young (${Math.floor(ageMs/60000)}m)`);
+          continue;
+        }
+      }
+
+      // MCap filter (kalau ada data)
       const mcap = pair.marketCap ?? pair.fdv ?? 0;
-      if (mcap > 0 && mcap < config.trading.minMcapUsd) return false;
+      if (mcap > 0 && mcap < config.trading.minMcapUsd) {
+        logger.debug(MODULE, `Skip ${symbol}: mcap $${(mcap/1000).toFixed(0)}K < min`);
+        continue;
+      }
 
       // Liquidity minimal $3K
       const liq = pair.liquidity?.usd ?? 0;
-      if (liq > 0 && liq < 3000) return false;
+      if (liq > 0 && liq < 3000) {
+        logger.debug(MODULE, `Skip ${symbol}: liq $${liq.toFixed(0)} too low`);
+        continue;
+      }
 
-      return true;
-    });
+      // Harus ada harga
+      const price = parseFloat(pair.priceUsd ?? '0');
+      if (price <= 0) continue;
+
+      passed.push(pair);
+    }
+
+    logger.info(MODULE, `Filter: ${passed.length}/${pairs.length} pairs passed`);
+    return passed;
   }
 
   /**
    * Build synthetic OHLCV dari price change snapshots
-   * DS free tier tidak punya OHLCV endpoint
    */
   private buildSyntheticOHLCV(pair: DSPair, currentPrice: number): OHLCVCandle[] {
-    const now = Math.floor(Date.now() / 1000);
-    const pc = pair.priceChange ?? {};
-    const vol = pair.volume ?? {};
+    const now  = Math.floor(Date.now() / 1000);
+    const pc   = pair.priceChange ?? {};
+    const vol  = pair.volume ?? {};
 
-    // Rekonstruksi harga dari % perubahan
     const p1h  = currentPrice / (1 + ((pc.h1  ?? 0) / 100)) || currentPrice;
     const p6h  = currentPrice / (1 + ((pc.h6  ?? 0) / 100)) || currentPrice;
     const p24h = currentPrice / (1 + ((pc.h24 ?? 0) / 100)) || currentPrice;
 
     const anchors = [
-      { ts: now - 86400, price: p24h, volPerCandle: (vol.h24 ?? 0) / 288 },
-      { ts: now - 21600, price: p6h,  volPerCandle: (vol.h6  ?? 0) / 72  },
-      { ts: now - 3600,  price: p1h,  volPerCandle: (vol.h1  ?? 0) / 12  },
-      { ts: now,         price: currentPrice, volPerCandle: (vol.m5 ?? 0) },
+      { ts: now - 86400, price: p24h, volPC: (vol.h24 ?? 0) / 288 },
+      { ts: now - 21600, price: p6h,  volPC: (vol.h6  ?? 0) / 72  },
+      { ts: now - 3600,  price: p1h,  volPC: (vol.h1  ?? 0) / 12  },
+      { ts: now,         price: currentPrice, volPC: vol.m5 ?? 0 },
     ];
 
     const candles: OHLCVCandle[] = [];
-
     for (let seg = 0; seg < anchors.length - 1; seg++) {
-      const start = anchors[seg];
-      const end   = anchors[seg + 1];
-      const steps = Math.round((end.ts - start.ts) / 300);
+      const s = anchors[seg], e = anchors[seg + 1];
+      const steps = Math.round((e.ts - s.ts) / 300);
       if (steps <= 0) continue;
-
       for (let i = 0; i < steps; i++) {
-        const t      = i / steps;
-        const noise  = 1 + (Math.random() - 0.5) * 0.004;
-        const close  = (start.price + (end.price - start.price) * t) * noise;
-        const spread = close * 0.002;
-
+        const t     = i / steps;
+        const noise = 1 + (Math.random() - 0.5) * 0.004;
+        const close = (s.price + (e.price - s.price) * t) * noise;
+        const sp    = close * 0.002;
         candles.push({
-          timestamp: start.ts + i * 300,
-          open:  close - spread * 0.5,
-          high:  close + spread,
-          low:   close - spread,
+          timestamp: s.ts + i * 300,
+          open:  close - sp * 0.5,
+          high:  close + sp,
+          low:   close - sp,
           close,
-          volume: (start.volPerCandle + end.volPerCandle) / 2,
+          volume: (s.volPC + e.volPC) / 2,
         });
       }
     }
-
     return candles;
   }
 
@@ -197,44 +202,53 @@ export class DexScreenerScanner {
    * Convert DSPair → TokenInfo
    */
   pairToTokenInfo(pair: DSPair): TokenInfo {
-    const now  = Math.floor(Date.now() / 1000);
+    const now   = Math.floor(Date.now() / 1000);
     const price = parseFloat(pair.priceUsd ?? '0');
     const mcap  = pair.marketCap ?? pair.fdv ?? 0;
     const createdSec = pair.pairCreatedAt ? pair.pairCreatedAt / 1000 : now - 7200;
 
     return {
-      address: pair.baseToken.address,
-      symbol:  pair.baseToken.symbol,
-      name:    pair.baseToken.name,
-      mcapUsd: mcap,
+      address:      pair.baseToken.address,
+      symbol:       pair.baseToken.symbol,
+      name:         pair.baseToken.name,
+      mcapUsd:      mcap,
       liquidityUsd: pair.liquidity?.usd ?? 0,
       volumeUsd24h: pair.volume?.h24 ?? 0,
       globalFeeSol: 0,
-      ageSeconds: now - createdSec,
-      priceUsd: price,
+      ageSeconds:   now - createdSec,
+      priceUsd:     price,
       priceChangePct1h: pair.priceChange?.h1 ?? 0,
-      holders: 0,
-      ohlcv: this.buildSyntheticOHLCV(pair, price),
+      holders:      0,
+      ohlcv:        this.buildSyntheticOHLCV(pair, price),
     };
   }
 
   /**
-   * Main scan
+   * Main scan: boost addresses → pair data → filter → TokenInfo
    */
   async scan(): Promise<TokenInfo[]> {
-    logger.info(MODULE, '🔍 DexScreener fallback scan...');
+    logger.info(MODULE, '🔍 DexScreener scan starting...');
 
-    const pairs = await this.fetchTrendingSolana();
-    if (!pairs.length) {
-      logger.warn(MODULE, 'DexScreener returned no pairs');
+    // Step 1: get addresses
+    const addresses = await this.fetchBoostedAddresses();
+    if (!addresses.length) {
+      logger.warn(MODULE, 'No boosted addresses found');
       return [];
     }
 
-    const filtered = this.filterPairs(pairs);
-    logger.info(MODULE, `${filtered.length}/${pairs.length} pairs passed filters`);
+    // Step 2: fetch pair data
+    const pairs = await this.fetchTokensByAddress(addresses);
+    logger.info(MODULE, `Fetched ${pairs.length} pairs for ${addresses.length} addresses`);
 
+    if (!pairs.length) return [];
+
+    // Step 3: filter
+    const filtered = this.filterPairs(pairs);
+    if (!filtered.length) return [];
+
+    // Step 4: convert
     const tokens = filtered.slice(0, 10).map(p => this.pairToTokenInfo(p));
-    logger.info(MODULE, `DexScreener done: ${tokens.length} tokens`);
+    logger.info(MODULE, `DexScreener done: ${tokens.length} tokens ready`);
     return tokens;
   }
 }
