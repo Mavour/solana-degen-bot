@@ -48,6 +48,33 @@ export class TradeSimulator {
       maxPriceImpactPct: config.trading.maxPriceImpactPct,
     };
 
+    // ── DRY RUN: skip semua Jupiter/RPC calls ─────────────────
+    // Tidak perlu quote asli — langsung approve dengan mock result
+    if (config.dryRun) {
+      logger.info(MODULE, `[DRY RUN] ${token.symbol} skipping Jupiter simulation`);
+      const mockQuote: QuoteResult = {
+        inputMint: 'So11111111111111111111111111111111111111112',
+        outputMint: token.address,
+        inAmount: BigInt(Math.floor(config.trading.maxTradeSol * 1_000_000_000)),
+        outAmount: BigInt(1_000_000),
+        priceImpactPct: 0.1,
+        slippageBps: Math.floor(slippagePct * 100),
+        routePlan: [],
+        rawQuote: { mock: true },
+      };
+      return {
+        approved: true,
+        tradeParams,
+        quoteResult: mockQuote,
+        simulationResult: {
+          success: true,
+          priceImpactPct: 0.1,
+          estimatedFeeSOL: 0.000005,
+        },
+      };
+    }
+    // ──────────────────────────────────────────────────────────
+
     // 2. Liquidity check: cek apakah ada cukup likuiditas
     const estimatedPriceImpact = estimatePriceImpact(
       tradeParams.amountSol,
