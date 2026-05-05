@@ -219,6 +219,9 @@ export class BotOrchestrator {
         await sleep(2500); // hormati GMGN rate limit
       }
 
+      // Update harga di RiskManager supaya /positions tampilkan PnL realtime
+      this.riskManager.updatePrices(priceMap);
+
       // Pass ke RiskManager — evaluasi RSI peak + SL + TP
       this.riskManager.checkExitSignals(priceMap, ohlcvMap);
 

@@ -29,6 +29,8 @@ export class RiskManager extends EventEmitter {
   private pendingApprovals: Set<string> = new Set();
   // Track kalau RSI sudah pernah peak untuk posisi ini (biar ga spam alert)
   private rsiPeakAlerted: Set<string> = new Set();
+  // Harga terakhir — diupdate dari monitor cycle tiap 2 menit
+  private lastKnownPrices: Map<string, number> = new Map();
 
   canTrade(tokenAddress: string): { allowed: boolean; reason?: string } {
     const openPositions = this.getOpenPositions();
@@ -87,6 +89,15 @@ export class RiskManager extends EventEmitter {
 
   getOpenPositions(): Position[] {
     return Array.from(this.positions.values()).filter((p) => p.status === 'OPEN');
+  }
+
+  /**
+   * Update harga terkini — dipanggil dari monitor cycle
+   */
+  updatePrices(prices: Map<string, number>): void {
+    prices.forEach((price, addr) => {
+      if (price > 0) this.lastKnownPrices.set(addr, price);
+    });
   }
 
   /**
@@ -224,7 +235,7 @@ export class RiskManager extends EventEmitter {
   }
 
   /**
-   * Position summary dengan PnL info untuk Telegram /positions
+   * Position summary dengan PnL — diupdate tiap 2 menit dari monitor cycle
    */
   getPositionSummary(): string {
     const open = this.getOpenPositions();
@@ -232,8 +243,22 @@ export class RiskManager extends EventEmitter {
 
     return open.map((p) => {
       const age = Math.floor((Date.now() - p.entryTimestamp) / 60000);
-      const rsiPeakPending = this.rsiPeakAlerted.has(p.id) ? ' ⚡peak' : '';
-      return `• *${p.symbol}* | ${p.amountSol} SOL | ${age}m ago${rsiPeakPending}`;
+      const ageStr = age < 60 ? `${age}m` : `${Math.floor(age/60)}h ${age%60}m`;
+      const rsiPeak = this.rsiPeakAlerted.has(p.id) ? ' ⚡' : '';
+
+      // Hitung PnL kalau ada harga terkini
+      const currentPrice = this.lastKnownPrices.get(p.tokenAddress);
+      let pnlStr = '_harga belum diupdate_';
+      if (currentPrice && p.entryPriceUsd > 0) {
+        const pnlPct = ((currentPrice - p.entryPriceUsd) / p.entryPriceUsd) * 100;
+        const pnlEmoji = pnlPct >= 0 ? '📈' : '📉';
+        pnlStr = `${pnlEmoji} ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%`;
+      }
+
+      return (
+        `• *${p.symbol}*${rsiPeak} | ${p.amountSol} SOL | ${ageStr}\n` +
+        `  Entry: $${p.entryPriceUsd.toFixed(8)} | PnL: ${pnlStr}`
+      );
     }).join('\n');
   }
 

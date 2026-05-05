@@ -116,7 +116,7 @@ export class DryRunExecutor {
       `🔧 Est fee: ${simulationResult.estimatedFeeSOL.toFixed(6)} SOL\n` +
       `📈 Signal: EMA${signal.emaTouched} | RSI K:${signal.stochRsiK.toFixed(1)} | ${signal.confidence}\n\n` +
       `🔗 [DexScreener](https://dexscreener.com/solana/${token.address})\n\n` +
-      `_Tidak ada transaksi nyata. DRY_RUN=true_`
+      `_Tidak ada transaksi nyata. Mode: DRY RUN_`
     );
 
     logger.info(MODULE, `✅ [DRY RUN] Paper position opened: ${token.symbol} @ $${entryPriceUsd.toFixed(8)}`);
