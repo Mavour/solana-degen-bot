@@ -262,6 +262,7 @@ export class TelegramBot {
       `⏭ Missed signals: ${this.missedSignals.length}\n\n` +
       `⚙️ *Config*\n` +
       `• Trade: ${config.trading.maxTradeSol} SOL\n` +
+      `• MCap: $${(config.trading.minMcapUsd/1000).toFixed(0)}K – $${(config.trading.maxMcapUsd/1000000).toFixed(0)}M\n` +
       `• Stop Loss: -${config.risk.stopLossPct}%\n` +
       `• RSI exit: >80\n` +
       `• Scan: tiap ${config.scanning.intervalSeconds / 60} menit\n` +

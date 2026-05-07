@@ -131,10 +131,14 @@ export class DexScreenerScanner {
         }
       }
 
-      // MCap filter (kalau ada data)
+      // MCap filter: min & max
       const mcap = pair.marketCap ?? pair.fdv ?? 0;
       if (mcap > 0 && mcap < config.trading.minMcapUsd) {
         logger.debug(MODULE, `Skip ${symbol}: mcap $${(mcap/1000).toFixed(0)}K < min`);
+        continue;
+      }
+      if (mcap > 0 && mcap > config.trading.maxMcapUsd) {
+        logger.debug(MODULE, `Skip ${symbol}: mcap $${(mcap/1000000).toFixed(2)}M > max $${(config.trading.maxMcapUsd/1000000).toFixed(0)}M`);
         continue;
       }
 

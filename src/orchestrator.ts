@@ -312,7 +312,7 @@ export class BotOrchestrator {
       `${walletSummary}\n\n` +
       `⚙️ *Trading Config*\n` +
       `• Trade size: ${config.trading.maxTradeSol} SOL\n` +
-      `• Min MCap: $${(config.trading.minMcapUsd / 1000).toFixed(0)}K\n` +
+      `• MCap range: $${(config.trading.minMcapUsd / 1000).toFixed(0)}K – $${(config.trading.maxMcapUsd / 1000000).toFixed(0)}M\n` +
       `• Min age: ${config.trading.minTokenAgeSeconds / 3600}h\n` +
       `• Stop Loss: -${config.risk.stopLossPct}%\n` +
       `• RSI exit: K/D > 80 (Obicle method)\n` +

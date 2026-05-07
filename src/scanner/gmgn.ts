@@ -97,10 +97,15 @@ export class GMGNScanner {
         continue;
       }
 
-      // MCap > $150K — RELAXED: pakai $100K kalau tidak ada data mcap
-      const mcapThreshold = mcap > 0 ? config.trading.minMcapUsd : 100000;
-      if (mcap > 0 && mcap < mcapThreshold) {
-        logger.debug(MODULE, `Skip ${symbol}: mcap $${(mcap/1000).toFixed(0)}K < $${(mcapThreshold/1000).toFixed(0)}K`);
+      // MCap filter: min $150K — max $5M (default)
+      // Kalau tidak ada data mcap, pakai relaxed threshold
+      const minMcap = mcap > 0 ? config.trading.minMcapUsd : 100000;
+      if (mcap > 0 && mcap < minMcap) {
+        logger.debug(MODULE, `Skip ${symbol}: mcap $${(mcap/1000).toFixed(0)}K < $${(minMcap/1000).toFixed(0)}K`);
+        continue;
+      }
+      if (mcap > 0 && mcap > config.trading.maxMcapUsd) {
+        logger.debug(MODULE, `Skip ${symbol}: mcap $${(mcap/1000000).toFixed(2)}M > max $${(config.trading.maxMcapUsd/1000000).toFixed(0)}M`);
         continue;
       }
 

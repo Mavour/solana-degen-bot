@@ -57,6 +57,8 @@ export const config = {
     maxPriceImpactPct: parseFloat(optionalEnv('MAX_PRICE_IMPACT_PCT', '2.0')),
     slippageMinPct: parseFloat(optionalEnv('SLIPPAGE_MIN_PCT', '0.5')),
     slippageMaxPct: parseFloat(optionalEnv('SLIPPAGE_MAX_PCT', '3.0')),
+    // Max market cap — degen strategy works best on micro-caps. Default $5M.
+    maxMcapUsd: parseFloat(optionalEnv('MAX_MCAP_USD', '5000000')),
   },
   scanning: {
     // 180 detik (3 menit) — aman untuk GMGN free tier.
