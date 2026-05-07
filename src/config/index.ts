@@ -59,6 +59,10 @@ export const config = {
     slippageMaxPct: parseFloat(optionalEnv('SLIPPAGE_MAX_PCT', '3.0')),
     // Max market cap — degen strategy works best on micro-caps. Default $5M.
     maxMcapUsd: parseFloat(optionalEnv('MAX_MCAP_USD', '5000000')),
+    // Obicle fee ratio: min SOL fee per $1K market cap. Default 0.1 = 10%.
+    // MCap $150K => 150 * 0.1 = 15 SOL min fee.
+    // MCap $237K => 237 * 0.1 = 23.7 SOL min fee.
+    minFeeSolPer1kMcap: parseFloat(optionalEnv('MIN_FEE_SOL_PER_1K_MCAP', '0.1')),
   },
   scanning: {
     // 180 detik (3 menit) — aman untuk GMGN free tier.

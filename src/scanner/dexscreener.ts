@@ -142,6 +142,10 @@ export class DexScreenerScanner {
         continue;
       }
 
+      // NOTE: DexScreener tidak expose fee data dalam SOL.
+      // Fee filter (Obicle 1:10) hanya aktif di GMGN (primary source).
+      // Token dari DexScreener lolos tanpa fee check.
+
       // Liquidity minimal $3K
       const liq = pair.liquidity?.usd ?? 0;
       if (liq > 0 && liq < 3000) {

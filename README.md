@@ -126,6 +126,7 @@ pm2 logs solana-degen-bot
 | `MAX_TRADE_SOL` | `0.1` | Max SOL per trade |
 | `MIN_MCAP_USD` | `150000` | Minimum market cap |
 | `MAX_MCAP_USD` | `5000000` | Maximum market cap (micro-cap ceiling) |
+| `MIN_FEE_SOL_PER_1K_MCAP` | `0.1` | Min SOL fee per $1K mcap (Obicle 1:10) |
 | `MIN_TOKEN_AGE_SECONDS` | `3600` | Min token age (1 hour) |
 | `MAX_PRICE_IMPACT_PCT` | `2.0` | Auto-cancel if impact > this |
 | `SLIPPAGE_MIN_PCT` | `0.5` | Dynamic slippage minimum |

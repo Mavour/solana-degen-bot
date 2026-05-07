@@ -91,6 +91,10 @@ export class GMGNScanner {
       const volume = token.volume || token.volume_1h || token.swaps_1h || 0;
       const symbol = token.symbol || token.token_symbol || 'UNKNOWN';
 
+      // Extract fee data — Obicle filter: fee / mcap >= 10%
+      const feeSol = token.total_fee_sol ?? token.fee_sol ?? token.total_fee ?? token.fee ?? 0;
+      const minFeeSol = mcap > 0 ? (mcap / 1000) * config.trading.minFeeSolPer1kMcap : 0;
+
       // Age > 1 jam
       if (ageSeconds < config.trading.minTokenAgeSeconds) {
         logger.debug(MODULE, `Skip ${symbol}: too young (${Math.floor(ageSeconds/60)}m)`);
@@ -106,6 +110,12 @@ export class GMGNScanner {
       }
       if (mcap > 0 && mcap > config.trading.maxMcapUsd) {
         logger.debug(MODULE, `Skip ${symbol}: mcap $${(mcap/1000000).toFixed(2)}M > max $${(config.trading.maxMcapUsd/1000000).toFixed(0)}M`);
+        continue;
+      }
+
+      // Obicle fee filter: fee SOL harus >= 10% dari market cap (dalam SOL numeric)
+      if (minFeeSol > 0 && feeSol < minFeeSol) {
+        logger.debug(MODULE, `Skip ${symbol}: fee ${feeSol.toFixed(2)} SOL < min ${minFeeSol.toFixed(2)} SOL (mcap $${(mcap/1000).toFixed(0)}K)`);
         continue;
       }
 
@@ -182,7 +192,7 @@ export class GMGNScanner {
             mcapUsd: t.market_cap || t.usd_market_cap || 0,
             liquidityUsd: t.liquidity || 0,
             volumeUsd24h: t.volume_24h || t.volume || 0,
-            globalFeeSol: 0,
+            globalFeeSol: t.total_fee_sol ?? t.fee_sol ?? t.total_fee ?? t.fee ?? 0,
             ageSeconds: now - (t.open_timestamp || t.created_timestamp || now - 7200),
             priceUsd: t.price || t.usd_price || 0,
             priceChangePct1h: t.price_change_percent1h || t.price_change_1h || 0,

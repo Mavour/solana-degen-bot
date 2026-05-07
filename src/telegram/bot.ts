@@ -504,6 +504,7 @@ export class TelegramBot {
       `🪙 *${token.symbol}* (${token.name})\n` +
       `📊 MCap: $${formatNumber(token.mcapUsd)}\n` +
       `💧 Liquidity: $${formatNumber(token.liquidityUsd)}\n` +
+      `⚡ Fee: ${token.globalFeeSol.toFixed(1)} SOL\n` +
       `🕐 Age: ${tokenAge}h ${tokenAgeMin}m\n` +
       `👥 Holders: ${token.holders.toLocaleString()}\n\n` +
       `📈 *Indicators*\n` +
