@@ -279,9 +279,13 @@ export class BotOrchestrator {
     ]) as string;
     logger.info(MODULE, 'Wallet info OK');
 
-    // Telegram launch
+    // Telegram launch — non-blocking agar cron setup tidak tertahan
     logger.info(MODULE, 'Launching Telegram bot...');
-    await this.telegramBot.launch();
+    this.telegramBot.launch().catch((e) => {
+      logger.error(MODULE, 'Telegram launch error', e);
+    });
+    // Beri waktu sebentar untuk polling terhubung
+    await sleep(3000);
     logger.info(MODULE, 'Telegram bot OK');
 
     await this.telegramBot.sendMessage(
