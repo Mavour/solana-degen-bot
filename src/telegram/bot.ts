@@ -277,9 +277,13 @@ export class TelegramBot {
     const summary = this.riskManager.getPositionSummary();
     const open = this.riskManager.getOpenPositions();
 
-    const keyboard = open.length > 0
-      ? Markup.inlineKeyboard([[Markup.button.callback('🔄 Refresh', 'SHOW_POSITIONS')]])
-      : Markup.inlineKeyboard([]);
+    // Build keyboard: SELL button for each position + Refresh
+    const buttons: any[] = [];
+    for (const pos of open.slice(0, 8)) { // max 8 sell buttons (Telegram limit)
+      buttons.push([Markup.button.callback(`🔴 SELL ${pos.symbol}`, `SELL_${pos.id}`)]);
+    }
+    buttons.push([Markup.button.callback('🔄 Refresh', 'SHOW_POSITIONS')]);
+    const keyboard = Markup.inlineKeyboard(buttons);
 
     await ctx.reply(
       `📂 *Open Positions*${mode}\n\n${summary}`,
