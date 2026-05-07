@@ -15,6 +15,7 @@ import { WalletManager } from './execution/wallet';
 import { RiskManager, ExitSignal } from './risk/manager';
 import { TelegramBot } from './telegram/bot';
 import { ApprovalRequest, SignalResult, OHLCVCandle } from './utils/types';
+import { PositionStore } from './utils/store';
 
 const MODULE = 'ORCHESTRATOR';
 
@@ -29,6 +30,7 @@ export class BotOrchestrator {
   private walletManager: WalletManager;
   private riskManager: RiskManager;
   private telegramBot: TelegramBot;
+  private store: PositionStore;
 
   private isRunning: boolean = false;
   private scanTask: cron.ScheduledTask | null = null;
@@ -44,7 +46,12 @@ export class BotOrchestrator {
     this.dsScanner   = new DexScreenerScanner();
     this.scanner     = new ScannerRouter();
 
+    // Persistence store (load from disk if exists)
+    this.store = new PositionStore();
+
     this.riskManager   = new RiskManager();
+    this.riskManager.setStore(this.store);
+
     this.walletManager = new WalletManager(this.connection);
     this.simulator     = new TradeSimulator(this.connection);
     this.telegramBot   = new TelegramBot(this.riskManager);
@@ -55,7 +62,11 @@ export class BotOrchestrator {
       this.telegramBot
     );
 
+    // Wire persistence + cross-references
+    this.executor.setStore(this.store);
+    this.telegramBot.setTradeExecutor(this.executor);
     this.telegramBot.scannerRouter = this.scanner;
+
     this.setupCallbacks();
     this.setupRiskEvents();
   }
@@ -237,6 +248,14 @@ export class BotOrchestrator {
 
       // Update harga di RiskManager supaya /positions tampilkan PnL
       this.riskManager.updatePrices(priceMap);
+
+      // Update paper trade prices untuk dry run report
+      if (config.dryRun && this.executor['dryRunExecutor']) {
+        for (const [addr, price] of priceMap) {
+          const logStr = this.executor['dryRunExecutor'].updatePaperPrice(addr, price);
+          if (logStr) logger.debug(MODULE, logStr);
+        }
+      }
 
       // Evaluasi exit signals — RSI peak + SL + TP
       this.riskManager.checkExitSignals(priceMap, ohlcvMap);

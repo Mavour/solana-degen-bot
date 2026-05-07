@@ -5,48 +5,55 @@
 //  - Scan, filter, indikator, simulasi semua berjalan NORMAL
 //  - Jupiter quote tetap di-fetch (validasi price impact real)
 //  - Tidak ada sign, tidak ada bundle, tidak ada on-chain tx
-//  - Paper position dicatat di memory
+//  - Paper position dicatat di memory + persisted to JSON
 //  - /positions di Telegram menampilkan paper PnL
 
 import { config } from '../config';
 import { logger } from '../utils/logger';
-import { ApprovalRequest, Position } from '../utils/types';
+import { ApprovalRequest, Position, PaperTrade } from '../utils/types';
 import { RiskManager } from '../risk/manager';
 import { TelegramBot } from '../telegram/bot';
+import { PositionStore } from '../utils/store';
 
 const MODULE = 'DRYRUN';
-
-// Paper trade result yang disimpan untuk laporan
-export interface PaperTrade {
-  id: string;
-  symbol: string;
-  tokenAddress: string;
-  entryPriceUsd: number;
-  amountSol: number;
-  tokensSimulated: number;
-  priceImpactPct: number;
-  slippagePct: number;
-  estimatedFeeSol: number;
-  entryTimestamp: number;
-  signalConfidence: string;
-  emaTouched: number;
-  stochRsiK: number;
-  // Filled on close
-  exitPriceUsd?: number;
-  exitTimestamp?: number;
-  pnlPct?: number;
-  status: 'OPEN' | 'CLOSED';
-}
 
 export class DryRunExecutor {
   private paperTrades: Map<string, PaperTrade> = new Map();
   private riskManager: RiskManager;
   private telegramBot: TelegramBot;
+  private store: PositionStore | null = null;
   private tradeCounter: number = 0;
 
   constructor(riskManager: RiskManager, telegramBot: TelegramBot) {
     this.riskManager = riskManager;
     this.telegramBot = telegramBot;
+  }
+
+  /**
+   * Inject store setelah construction (dari orchestrator)
+   */
+  setStore(store: PositionStore): void {
+    this.store = store;
+    // Load existing paper trades from disk
+    const loaded = store.getPaperTradesMap();
+    if (loaded.size > 0) {
+      this.paperTrades = loaded;
+      // Restore counter dari max existing id
+      const ids = Array.from(loaded.keys()).filter(k => k.startsWith('paper_'));
+      if (ids.length) {
+        const maxNum = Math.max(...ids.map(k => {
+          const parts = k.split('_');
+          return parseInt(parts[1] || '0', 10);
+        }));
+        this.tradeCounter = maxNum;
+      }
+    }
+  }
+
+  private save(): void {
+    if (this.store) {
+      this.store.setPaperTradesMap(this.paperTrades);
+    }
   }
 
   /**
@@ -59,13 +66,8 @@ export class DryRunExecutor {
     logger.info(MODULE, `📝 [DRY RUN] Simulating trade: ${token.symbol} | ${tradeParams.amountSol} SOL`);
 
     // Hitung paper entry price dari Jupiter quote
-    // outAmount = jumlah token yang akan diterima
     const tokensSimulated = Number(quoteResult.outAmount);
-    // harga per token dalam SOL, konversi ke USD
-    const solPriceUsd = token.priceUsd > 0
-      ? (tradeParams.amountSol * 150) / (tokensSimulated || 1) // fallback SOL ~$150
-      : 0;
-    const entryPriceUsd = token.priceUsd; // pakai harga market langsung
+    const entryPriceUsd = token.priceUsd > 0 ? token.priceUsd : 0;
 
     const paperTradeId = `paper_${++this.tradeCounter}_${Date.now()}`;
 
@@ -87,6 +89,7 @@ export class DryRunExecutor {
     };
 
     this.paperTrades.set(paperTradeId, paperTrade);
+    this.save();
 
     // Daftarkan sebagai real position di RiskManager supaya:
     // 1. canTrade() block token ini dari signal duplikat
@@ -107,19 +110,56 @@ export class DryRunExecutor {
 
     // Kirim notif ke Telegram
     await this.telegramBot.sendMessage(
-      `📝 *[DRY RUN] PAPER TRADE SIMULATED*\n\n` +
-      `🪙 *${token.symbol}*\n` +
-      `💰 Size: ${tradeParams.amountSol} SOL (paper)\n` +
-      `📊 Entry price: $${entryPriceUsd.toFixed(8)}\n` +
-      `📉 Price impact: ${quoteResult.priceImpactPct.toFixed(3)}% ✅\n` +
-      `⚡ Slippage: ${tradeParams.slippagePct}%\n` +
-      `🔧 Est fee: ${simulationResult.estimatedFeeSOL.toFixed(6)} SOL\n` +
-      `📈 Signal: EMA${signal.emaTouched} | RSI K:${signal.stochRsiK.toFixed(1)} | ${signal.confidence}\n\n` +
-      `🔗 [DexScreener](https://dexscreener.com/solana/${token.address})\n\n` +
+      `📝 *[DRY RUN] PAPER TRADE SIMULATED*
+
+` +
+      `🪙 *${token.symbol}*
+` +
+      `💰 Size: ${tradeParams.amountSol} SOL (paper)
+` +
+      `📊 Entry price: $${entryPriceUsd.toFixed(8)}
+` +
+      `📉 Price impact: ${quoteResult.priceImpactPct.toFixed(3)}% ✅
+` +
+      `⚡ Slippage: ${tradeParams.slippagePct}%
+` +
+      `🔧 Est fee: ${simulationResult.estimatedFeeSOL.toFixed(6)} SOL
+` +
+      `📈 Signal: EMA${signal.emaTouched} | RSI K:${signal.stochRsiK.toFixed(1)} | ${signal.confidence}
+
+` +
+      `🔗 [DexScreener](https://dexscreener.com/solana/${token.address})
+
+` +
       `_Tidak ada transaksi nyata. Mode: DRY RUN_`
     );
 
     logger.info(MODULE, `✅ [DRY RUN] Paper position opened: ${token.symbol} @ $${entryPriceUsd.toFixed(8)}`);
+  }
+
+  /**
+   * Close paper trade — dipanggil saat exit signal atau user jual manual
+   */
+  closePaperTrade(tokenAddress: string, exitPriceUsd: number): void {
+    const trade = Array.from(this.paperTrades.values()).find(
+      (t) => t.tokenAddress === tokenAddress && t.status === 'OPEN'
+    );
+    if (!trade) {
+      logger.warn(MODULE, `No open paper trade found for ${tokenAddress.slice(0, 8)}`);
+      return;
+    }
+
+    trade.exitPriceUsd = exitPriceUsd;
+    trade.exitTimestamp = Date.now();
+    trade.pnlPct = trade.entryPriceUsd > 0
+      ? ((exitPriceUsd - trade.entryPriceUsd) / trade.entryPriceUsd) * 100
+      : 0;
+    trade.status = 'CLOSED';
+
+    this.paperTrades.set(trade.id, trade);
+    this.save();
+
+    logger.info(MODULE, `📁 [DRY RUN] Paper position closed: ${trade.symbol} | PnL: ${trade.pnlPct.toFixed(2)}%`);
   }
 
   /**

@@ -94,8 +94,8 @@ export class TradeSimulator {
       };
     }
 
-    // 3. Get Jupiter quote
-    const quote = await this.jupiterClient.getQuote(
+    // 3. Get Jupiter buy quote
+    const quote = await this.jupiterClient.getBuyQuote(
       token.address,
       tradeParams.amountSol,
       tradeParams.slippagePct

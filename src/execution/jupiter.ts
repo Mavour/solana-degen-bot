@@ -56,17 +56,17 @@ export class JupiterClient {
   }
 
   /**
-   * Dapatkan quote untuk swap SOL -> Token
+   * Dapatkan quote untuk swap SOL -> Token (BUY)
    * Di dry run mode: skip Jupiter call, return mock quote
    */
-  async getQuote(
+  async getBuyQuote(
     tokenMint: string,
     amountSol: number,
     slippagePct: number
   ): Promise<QuoteResult | null> {
     // ── DRY RUN: skip Jupiter, return mock quote ──────────────
     if (config.dryRun) {
-      logger.debug(MODULE, `[DRY RUN] Mock quote for ${tokenMint.slice(0, 8)}`);
+      logger.debug(MODULE, `[DRY RUN] Mock buy quote for ${tokenMint.slice(0, 8)}`);
       const lamports = Math.floor(amountSol * LAMPORTS_PER_SOL);
       return {
         inputMint: WSOL,
@@ -76,7 +76,7 @@ export class JupiterClient {
         priceImpactPct: 0.1,
         slippageBps: Math.floor(slippagePct * 100),
         routePlan: [],
-        rawQuote: { mock: true },
+        rawQuote: { mock: true, direction: 'buy' },
       };
     }
     // ─────────────────────────────────────────────────────────
@@ -84,16 +84,71 @@ export class JupiterClient {
     const lamports = Math.floor(amountSol * LAMPORTS_PER_SOL);
     const slippageBps = Math.floor(slippagePct * 100);
 
-    // Retry 2x dengan delay
+    return this.fetchQuote({
+      inputMint: WSOL,
+      outputMint: tokenMint,
+      amount: lamports.toString(),
+      slippageBps,
+      label: `${amountSol} SOL -> ${tokenMint.slice(0, 8)}`,
+    });
+  }
+
+  /**
+   * Dapatkan quote untuk swap Token -> SOL (SELL)
+   */
+  async getSellQuote(
+    tokenMint: string,
+    tokenAmountRaw: string, // exact base unit amount from position
+    slippagePct: number
+  ): Promise<QuoteResult | null> {
+    // ── DRY RUN: skip Jupiter, return mock quote ──────────────
+    if (config.dryRun) {
+      logger.debug(MODULE, `[DRY RUN] Mock sell quote for ${tokenMint.slice(0, 8)}`);
+      const amountBig = BigInt(tokenAmountRaw);
+      // Mock: dapat 95% dari nilai dalam SOL lamports (asumsi token = SOL value)
+      const outLamports = (amountBig * BigInt(95)) / BigInt(100);
+      return {
+        inputMint: tokenMint,
+        outputMint: WSOL,
+        inAmount: amountBig,
+        outAmount: outLamports,
+        priceImpactPct: 0.15,
+        slippageBps: Math.floor(slippagePct * 100),
+        routePlan: [],
+        rawQuote: { mock: true, direction: 'sell' },
+      };
+    }
+    // ─────────────────────────────────────────────────────────
+
+    const slippageBps = Math.floor(slippagePct * 100);
+
+    return this.fetchQuote({
+      inputMint: tokenMint,
+      outputMint: WSOL,
+      amount: tokenAmountRaw,
+      slippageBps,
+      label: `${tokenMint.slice(0, 8)} -> SOL (sell)`,
+    });
+  }
+
+  private async fetchQuote(args: {
+    inputMint: string;
+    outputMint: string;
+    amount: string;
+    slippageBps: number;
+    label: string;
+  }): Promise<QuoteResult | null> {
+    const { inputMint, outputMint, amount, slippageBps, label } = args;
+
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
-        logger.debug(MODULE, `Quote attempt ${attempt}: ${amountSol} SOL -> ${tokenMint.slice(0, 8)}`);
+        logger.debug(MODULE, `Quote attempt ${attempt}: ${label}`);
 
         const response = await this.client.get<JupiterQuoteResponse>('/quote', {
           params: {
-            inputMint: WSOL,
-            outputMint: tokenMint,
-            amount: lamports.toString(),
+            inputMint,
+            outputMint,
+            amount,
             slippageBps,
             maxAccounts: 20,
             onlyDirectRoutes: false,
@@ -104,7 +159,7 @@ export class JupiterClient {
         const q = response.data;
         const priceImpact = parseFloat(q.priceImpactPct);
 
-        logger.debug(MODULE, `Quote OK | impact:${priceImpact.toFixed(3)}% slippage:${slippagePct}%`);
+        logger.debug(MODULE, `Quote OK | impact:${priceImpact.toFixed(3)}% slippage:${(slippageBps/100).toFixed(2)}%`);
 
         return {
           inputMint: q.inputMint,

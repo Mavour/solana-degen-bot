@@ -69,9 +69,13 @@ export interface Position {
   entryPriceUsd: number;
   amountSol: number;
   tokensReceived: number;
+  tokensReceivedRaw?: string; // BigInt string for exact sell amount precision
   entryTimestamp: number;
   txSignature: string;
   status: 'OPEN' | 'CLOSED';
+  exitPriceUsd?: number;
+  exitTimestamp?: number;
+  pnlPct?: number;
 }
 
 export interface ApprovalRequest {
@@ -82,4 +86,26 @@ export interface ApprovalRequest {
   simulationResult: SimulationResult;
   timestamp: number;
   status: 'PENDING' | 'APPROVED' | 'REJECTED' | 'EXPIRED';
+}
+
+// ── Paper Trade (Dry Run) ────────────────────────────────────
+
+export interface PaperTrade {
+  id: string;
+  symbol: string;
+  tokenAddress: string;
+  entryPriceUsd: number;
+  amountSol: number;
+  tokensSimulated: number;
+  priceImpactPct: number;
+  slippagePct: number;
+  estimatedFeeSol: number;
+  entryTimestamp: number;
+  signalConfidence: string;
+  emaTouched: number;
+  stochRsiK: number;
+  exitPriceUsd?: number;
+  exitTimestamp?: number;
+  pnlPct?: number;
+  status: 'OPEN' | 'CLOSED';
 }

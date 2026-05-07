@@ -6,6 +6,7 @@ import { StochasticRSI } from 'technicalindicators';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 import { Position, SignalResult, OHLCVCandle } from '../utils/types';
+import { PositionStore } from '../utils/store';
 
 const MODULE = 'RISK';
 
@@ -31,6 +32,26 @@ export class RiskManager extends EventEmitter {
   private rsiPeakAlerted: Set<string> = new Set();
   // Harga terakhir — diupdate dari monitor cycle tiap 2 menit
   private lastKnownPrices: Map<string, number> = new Map();
+  private store: PositionStore | null = null;
+
+  /**
+   * Inject store untuk persistence. Dipanggil dari orchestrator setelah construction.
+   */
+  setStore(store: PositionStore): void {
+    this.store = store;
+    const loaded = store.getPositionsMap();
+    if (loaded.size > 0) {
+      this.positions = loaded;
+      const open = Array.from(this.positions.values()).filter(p => p.status === 'OPEN').length;
+      logger.info(MODULE, `Restored ${loaded.size} positions from disk (${open} OPEN)`);
+    }
+  }
+
+  private save(): void {
+    if (this.store) {
+      this.store.setPositionsMap(this.positions);
+    }
+  }
 
   canTrade(tokenAddress: string): { allowed: boolean; reason?: string } {
     const openPositions = this.getOpenPositions();
@@ -70,6 +91,7 @@ export class RiskManager extends EventEmitter {
     this.rsiPeakAlerted.delete(position.id); // reset on new position
     logger.info(MODULE, `Position opened: ${position.symbol} | ${position.amountSol} SOL`);
     this.emit('position:opened', position);
+    this.save();
   }
 
   closePosition(positionId: string, exitPriceUsd: number): Position | null {
@@ -77,18 +99,25 @@ export class RiskManager extends EventEmitter {
     if (!position) return null;
 
     position.status = 'CLOSED';
+    position.exitPriceUsd = exitPriceUsd;
+    position.exitTimestamp = Date.now();
+    position.pnlPct = ((exitPriceUsd - position.entryPriceUsd) / position.entryPriceUsd) * 100;
     this.positions.set(positionId, position);
     this.rsiPeakAlerted.delete(positionId);
 
-    const pnlPct = ((exitPriceUsd - position.entryPriceUsd) / position.entryPriceUsd) * 100;
-    logger.info(MODULE, `Position closed: ${position.symbol} | PnL: ${pnlPct.toFixed(2)}%`);
-    this.emit('position:closed', { position, exitPriceUsd, pnlPct });
+    logger.info(MODULE, `Position closed: ${position.symbol} | PnL: ${position.pnlPct.toFixed(2)}%`);
+    this.emit('position:closed', { position, exitPriceUsd, pnlPct: position.pnlPct });
+    this.save();
 
     return position;
   }
 
   getOpenPositions(): Position[] {
     return Array.from(this.positions.values()).filter((p) => p.status === 'OPEN');
+  }
+
+  getLastKnownPrice(tokenAddress: string): number | undefined {
+    return this.lastKnownPrices.get(tokenAddress);
   }
 
   /**

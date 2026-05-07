@@ -14,6 +14,8 @@ import { DryRunExecutor } from './dryrun';
 import { RiskManager } from '../risk/manager';
 import { TelegramBot } from '../telegram/bot';
 import { ApprovalRequest, Position } from '../utils/types';
+import { calculateVolatility, calculateDynamicSlippage } from '../analysis/indicators';
+import { PositionStore } from '../utils/store';
 
 const MODULE = 'EXECUTOR';
 
@@ -45,8 +47,12 @@ export class TradeExecutor {
     this.telegramBot.dryRunExecutor = this.dryRunExecutor;
   }
 
+  setStore(store: PositionStore): void {
+    this.dryRunExecutor.setStore(store);
+  }
+
   /**
-   * Execute trade setelah user approve di Telegram.
+   * Execute BUY trade setelah user approve di Telegram.
    * Kalau DRY_RUN=true → route ke dryRunExecutor (zero on-chain action).
    * Kalau live → safety checks → Jupiter → Jito.
    */
@@ -62,7 +68,7 @@ export class TradeExecutor {
     }
     // ───────────────────────────────────────────────────────
 
-    logger.info(MODULE, `⚡ Executing trade: ${token.symbol} | ${tradeParams.amountSol} SOL`);
+    logger.info(MODULE, `⚡ Executing BUY: ${token.symbol} | ${tradeParams.amountSol} SOL`);
 
     // --- SAFETY CHECKS sebelum eksekusi ---
 
@@ -90,15 +96,15 @@ export class TradeExecutor {
     }
 
     // 3. Re-fetch fresh quote (quote lama mungkin sudah stale)
-    logger.info(MODULE, `Re-fetching fresh quote for ${token.symbol}...`);
-    const freshQuote = await this.jupiterClient.getQuote(
+    logger.info(MODULE, `Re-fetching fresh buy quote for ${token.symbol}...`);
+    const freshQuote = await this.jupiterClient.getBuyQuote(
       token.address,
       tradeParams.amountSol,
       tradeParams.slippagePct
     );
 
     if (!freshQuote) {
-      const reason = 'Failed to get fresh Jupiter quote';
+      const reason = 'Failed to get fresh Jupiter buy quote';
       logger.error(MODULE, reason);
       await this.telegramBot.sendTradeResult(token.symbol, false, { amountSol: tradeParams.amountSol, error: reason });
       return;
@@ -151,6 +157,7 @@ export class TradeExecutor {
 
     // 8. Trade berhasil — catat position
     const tokensReceived = Number(freshQuote.outAmount);
+    const tokensReceivedRaw = freshQuote.outAmount.toString();
     const solPriceUsd = await this.walletManager.getSOLPriceUSD();
     const entryPriceUsd = (tradeParams.amountSol * solPriceUsd) / (tokensReceived || 1);
 
@@ -161,6 +168,7 @@ export class TradeExecutor {
       entryPriceUsd,
       amountSol: tradeParams.amountSol,
       tokensReceived,
+      tokensReceivedRaw,
       entryTimestamp: Date.now(),
       txSignature: result.bundleId ?? 'jito_bundle',
       status: 'OPEN',
@@ -168,10 +176,131 @@ export class TradeExecutor {
 
     this.riskManager.addPosition(position);
 
-    logger.info(MODULE, `✅ Trade SUCCESS: ${token.symbol} | BundleID: ${result.bundleId?.slice(0, 12)}`);
+    logger.info(MODULE, `✅ BUY SUCCESS: ${token.symbol} | BundleID: ${result.bundleId?.slice(0, 12)}`);
     await this.telegramBot.sendTradeResult(token.symbol, true, {
       amountSol: tradeParams.amountSol,
       bundleId: result.bundleId,
+      side: 'BUY',
+    });
+  }
+
+  /**
+   * Execute SELL trade (100% of position tokens → SOL).
+   * Triggered by user clicking SELL button or /sell command.
+   */
+  async executeSell(position: Position): Promise<void> {
+    const { symbol, tokenAddress, tokensReceivedRaw } = position;
+
+    // Determine exact amount to sell
+    const sellAmountRaw = tokensReceivedRaw ?? String(Math.floor(position.tokensReceived));
+    if (!sellAmountRaw || sellAmountRaw === '0') {
+      const reason = 'Invalid token amount for sell';
+      logger.error(MODULE, reason);
+      await this.telegramBot.sendSellResult(symbol, false, { error: reason });
+      return;
+    }
+
+    // ── DRY RUN INTERCEPT ──────────────────────────────────
+    if (config.dryRun) {
+      logger.info(MODULE, `🧪 [DRY RUN] Simulating sell: ${symbol}`);
+      // Use current known price or entry price as fallback
+      const exitPriceUsd = this.riskManager.getLastKnownPrice(tokenAddress) ?? position.entryPriceUsd;
+      this.dryRunExecutor.closePaperTrade(tokenAddress, exitPriceUsd);
+      this.riskManager.closePosition(position.id, exitPriceUsd);
+      await this.telegramBot.sendSellResult(symbol, true, {
+        side: 'SELL',
+        exitPriceUsd,
+        pnlPct: ((exitPriceUsd - position.entryPriceUsd) / position.entryPriceUsd) * 100,
+      });
+      return;
+    }
+    // ───────────────────────────────────────────────────────
+
+    logger.info(MODULE, `⚡ Executing SELL: ${symbol} | amountRaw: ${sellAmountRaw}`);
+
+    // 1. Dynamic slippage for sell (fallback to ~1.75% if no OHLCV)
+    let slippagePct = 1.75;
+    // Try to get token OHLCV from risk manager if available (optional future enhancement)
+    // For now use middle-ground to avoid excessive fees while ensuring execution
+    if (slippagePct > config.trading.slippageMaxPct) {
+      slippagePct = config.trading.slippageMaxPct;
+    }
+
+    // 2. Re-fetch fresh SELL quote
+    logger.info(MODULE, `Re-fetching fresh sell quote for ${symbol}...`);
+    const freshQuote = await this.jupiterClient.getSellQuote(
+      tokenAddress,
+      sellAmountRaw,
+      slippagePct
+    );
+
+    if (!freshQuote) {
+      const reason = 'Failed to get fresh Jupiter sell quote';
+      logger.error(MODULE, reason);
+      await this.telegramBot.sendSellResult(symbol, false, { error: reason });
+      return;
+    }
+
+    // 3. Price impact check
+    if (freshQuote.priceImpactPct > config.trading.maxPriceImpactPct) {
+      const reason = `Sell price impact too high: ${freshQuote.priceImpactPct.toFixed(2)}% (max ${config.trading.maxPriceImpactPct}%)`;
+      logger.warn(MODULE, reason);
+      await this.telegramBot.sendSellResult(symbol, false, { error: reason });
+      return;
+    }
+
+    // 4. Build swap transaction (direction handled by quote)
+    const jitoTipLamports = Math.floor(config.jito.tipAmount * 1_000_000_000);
+    const swapTx = await this.jupiterClient.buildSwapTransaction(
+      freshQuote,
+      this.walletManager.publicKey,
+      jitoTipLamports
+    );
+
+    if (!swapTx) {
+      const reason = 'Failed to build sell swap transaction';
+      logger.error(MODULE, reason);
+      await this.telegramBot.sendSellResult(symbol, false, { error: reason });
+      return;
+    }
+
+    // 5. Sign
+    swapTx.sign([this.walletManager.keypair]);
+
+    // 6. Execute via Jito
+    logger.info(MODULE, `Submitting Jito sell bundle for ${symbol}...`);
+    const result = await this.jitoExecutor.executeSwapBundle(
+      swapTx,
+      this.walletManager.keypair
+    );
+
+    if (!result.success) {
+      logger.error(MODULE, `Sell failed: ${result.error}`);
+      await this.telegramBot.sendSellResult(symbol, false, {
+        bundleId: result.bundleId,
+        error: result.error,
+      });
+      return;
+    }
+
+    // 7. Success — close position
+    const solReceived = Number(freshQuote.outAmount) / 1_000_000_000;
+    const solPriceUsd = await this.walletManager.getSOLPriceUSD();
+    // Harga per token dalam USD (konsisten dengan entryPriceUsd calculation)
+    const exitPriceUsd = position.tokensReceived > 0
+      ? (solReceived * solPriceUsd) / position.tokensReceived
+      : 0;
+
+    const closedPos = this.riskManager.closePosition(position.id, exitPriceUsd);
+    const pnlPct = closedPos?.pnlPct ?? 0;
+
+    logger.info(MODULE, `✅ SELL SUCCESS: ${symbol} | BundleID: ${result.bundleId?.slice(0, 12)} | PnL: ${pnlPct.toFixed(2)}%`);
+    await this.telegramBot.sendSellResult(symbol, true, {
+      side: 'SELL',
+      bundleId: result.bundleId,
+      solReceived,
+      exitPriceUsd,
+      pnlPct,
     });
   }
 }

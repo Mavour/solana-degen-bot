@@ -39,7 +39,7 @@ solana-degen-bot/
 ## 🔄 Bot Flow
 
 ```
-[CRON Every 60s]
+[CRON Every 3 min]
        │
        ▼
 [GMGN Scanner]
@@ -131,7 +131,7 @@ pm2 logs solana-degen-bot
 | `SLIPPAGE_MAX_PCT` | `3.0` | Dynamic slippage maximum |
 | `STOP_LOSS_PCT` | `15` | Stop-loss alert threshold |
 | `MAX_OPEN_POSITIONS` | `3` | Max concurrent positions |
-| `SCAN_INTERVAL_SECONDS` | `60` | Scanner frequency |
+| `SCAN_INTERVAL_SECONDS` | `180` | Scanner frequency (3 min) |
 | `JITO_TIP_AMOUNT` | `0.0001` | Jito tip in SOL |
 
 ---

@@ -1,20 +1,20 @@
 // src/telegram/bot.ts
-// Telegraf Telegram bot — Alert + Manual Approval + Missed Signals
+// Telegraf Telegram bot — Alert + Manual Approval + Missed Signals + Sell
 
 import { Telegraf, Markup, Context } from 'telegraf';
 import { config } from '../config';
 import { logger } from '../utils/logger';
-import { ApprovalRequest, SignalResult, QuoteResult, SimulationResult, TradeParams } from '../utils/types';
+import { ApprovalRequest, SignalResult, QuoteResult, SimulationResult, TradeParams, Position } from '../utils/types';
 import type { ExitSignal } from '../risk/manager';
 import { RiskManager } from '../risk/manager';
 import type { ScannerRouter } from '../scanner/index';
 import type { DryRunExecutor } from '../execution/dryrun';
+import type { TradeExecutor } from '../execution/executor';
 
 const MODULE = 'TELEGRAM';
 
-// TTL bisa dikonfigurasi — default 10 menit (lebih santai dari 5 menit sebelumnya)
+// TTL bisa dikonfigurasi — default 10 menit
 const APPROVAL_TTL_MS = parseInt(process.env.APPROVAL_TTL_MINUTES ?? '10') * 60 * 1000;
-// Reminder dikirim di 50% TTL (misal TTL 10 menit → reminder menit ke-5)
 const REMINDER_AT_MS  = Math.floor(APPROVAL_TTL_MS / 2);
 
 interface MissedSignal {
@@ -38,10 +38,15 @@ export class TelegramBot {
   private missedSignals: MissedSignal[] = [];
   scannerRouter: ScannerRouter | null = null;
   dryRunExecutor: DryRunExecutor | null = null;
+  private tradeExecutor: TradeExecutor | null = null;
   private onManualScanCallback: (() => Promise<void>) | null = null;
 
   onManualScan(cb: () => Promise<void>): void {
     this.onManualScanCallback = cb;
+  }
+
+  setTradeExecutor(executor: TradeExecutor): void {
+    this.tradeExecutor = executor;
   }
 
   constructor(riskManager: RiskManager) {
@@ -88,7 +93,7 @@ export class TelegramBot {
       );
     });
 
-    // /ping — selalu balas, buat cek apakah bot masih hidup
+    // /ping
     this.bot.command('ping', async (ctx) => {
       await ctx.reply(`🏓 Pong! Bot hidup.\nUptime: ${Math.floor(process.uptime() / 60)}m`);
     });
@@ -100,7 +105,7 @@ export class TelegramBot {
     this.bot.command('missed',    async (ctx) => this.handleMissed(ctx));
     this.bot.command('help',      async (ctx) => this.handleHelp(ctx));
 
-    // /scan — trigger scan manual tanpa nunggu cron
+    // /scan
     this.bot.command('scan', async (ctx) => {
       await ctx.reply('🔍 Memulai scan manual...');
       if (this.onManualScanCallback) {
@@ -112,12 +117,61 @@ export class TelegramBot {
       }
     });
 
+    // /sell <SYMBOL> — manual sell command
+    this.bot.command('sell', async (ctx) => {
+      const text = (ctx.message as any)?.text ?? '';
+      const parts = text.split(/\s+/);
+      const symbol = parts[1]?.toUpperCase().trim();
+
+      if (!symbol) {
+        await ctx.reply(
+          `⚠️ *Cara pakai:*\n` +
+          `\`/sell SYMBOL\`\n\n` +
+          `Contoh: \`/sell BONK\`\n` +
+          `Bot akan cari open position dan kirim tombol SELL.`,
+          { parse_mode: 'Markdown' }
+        );
+        return;
+      }
+
+      const open = this.riskManager.getOpenPositions();
+      const pos = open.find(p => p.symbol.toUpperCase() === symbol);
+      if (!pos) {
+        await ctx.reply(`❌ Tidak ada open position untuk *${symbol}*.\nCek /positions.`, { parse_mode: 'Markdown' });
+        return;
+      }
+
+      await ctx.reply(
+        `⚠️ *Konfirmasi Jual*\n\n` +
+        `🪙 *${pos.symbol}*\n` +
+        `📥 Entry: $${pos.entryPriceUsd.toFixed(8)}\n` +
+        `💰 Size: ${pos.amountSol} SOL\n\n` +
+        `Klik tombol di bawah untuk eksekusi:`,
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback(`🔴 SELL NOW ${pos.symbol}`, `SELL_${pos.id}`)],
+            [Markup.button.callback('❌ Batal', 'DISMISS_EXIT')],
+          ]),
+        }
+      );
+    });
+
     // APPROVE / CANCEL inline button callbacks
     this.bot.action(/^APPROVE_(.+)$/, async (ctx) => {
       await this.handleApproval(ctx, ctx.match[1], 'APPROVED');
     });
     this.bot.action(/^CANCEL_(.+)$/, async (ctx) => {
       await this.handleApproval(ctx, ctx.match[1], 'REJECTED');
+    });
+
+    // SELL / DISMISS callbacks
+    this.bot.action(/^SELL_(.+)$/, async (ctx) => {
+      await this.handleSellCallback(ctx, ctx.match[1]);
+    });
+    this.bot.action('DISMISS_EXIT', async (ctx) => {
+      await ctx.answerCbQuery('Dismissed');
+      await ctx.editMessageText('⚠️ Exit alert di-dismiss. Ketik /sell <SYMBOL> kapan saja untuk jual manual.').catch(() => {});
     });
 
     // Inline refresh callbacks
@@ -133,6 +187,7 @@ export class TelegramBot {
     });
     this.bot.action('SHOW_DRYREPORT', async (ctx) => {
       await ctx.answerCbQuery();
+      await ctx.deleteMessage().catch(() => {});
       await this.handleDryReport(ctx);
     });
     this.bot.action('CLEAR_MISSED', async (ctx) => {
@@ -145,6 +200,35 @@ export class TelegramBot {
     this.bot.catch((err, ctx) => {
       logger.error(MODULE, `Telegraf error for ${ctx.updateType}`, err);
     });
+  }
+
+  // ── Sell callback handler ────────────────────────────────────
+
+  private async handleSellCallback(ctx: Context, positionId: string): Promise<void> {
+    const position = this.riskManager.getOpenPositions().find(p => p.id === positionId);
+    if (!position) {
+      await ctx.answerCbQuery('❌ Position sudah ditutup atau tidak ditemukan');
+      return;
+    }
+
+    await ctx.answerCbQuery('⏳ Selling...');
+    await ctx.editMessageText(
+      `⏳ *SELLING ${position.symbol}...*\n\n` +
+      `Mengirim Jito sell bundle...`,
+      { parse_mode: 'Markdown' }
+    );
+
+    if (!this.tradeExecutor) {
+      await ctx.editMessageText('❌ Trade executor belum siap.').catch(() => {});
+      return;
+    }
+
+    try {
+      await this.tradeExecutor.executeSell(position);
+    } catch (err) {
+      logger.error(MODULE, `Sell callback error for ${position.symbol}`, err);
+      await this.sendMessage(`❌ *SELL ERROR*\n${position.symbol}\n${String(err)}`);
+    }
   }
 
   // ── Shared handlers ──────────────────────────────────────────
@@ -266,7 +350,7 @@ export class TelegramBot {
       `4. Kalau tidak ada respons dalam ${reminderMin} menit, bot kirim reminder\n` +
       `5. Alert expired setelah ${ttlMin} menit, tersimpan di Missed Signals\n` +
       `6. Bot monitor RSI tiap 2 menit, alert lagi saat RSI peak lebih dari 80\n` +
-      `7. Exit manual di DexScreener saat dapat exit alert\n\n` +
+      `7. Klik SELL NOW di alert exit, atau ketik /sell SYMBOL untuk jual manual\n\n` +
       `*Entry signal (Obicle method):*\n` +
       `• Harga menyentuh EMA 25/50/100/200\n` +
       `• Stoch RSI di bawah 20 (bottoming)\n\n` +
@@ -458,15 +542,35 @@ export class TelegramBot {
   async sendTradeResult(
     symbol: string,
     success: boolean,
-    details: { amountSol: number; txSignature?: string; bundleId?: string; error?: string }
+    details: { amountSol?: number; txSignature?: string; bundleId?: string; error?: string; side?: 'BUY' | 'SELL' }
+  ): Promise<void> {
+    const side = details.side ?? 'BUY';
+    const message = success
+      ? `✅ *${side} EXECUTED*\n\n` +
+        `🪙 Token: ${symbol}\n` +
+        (details.amountSol ? `💰 Amount: ${details.amountSol} SOL\n` : '') +
+        (details.bundleId ? `📦 Bundle: ${details.bundleId.slice(0, 12)}...\n` : '') +
+        (side === 'BUY' ? `\n⚠️ *Monitor posisi — exit manual saat RSI puncak*` : `\n📊 Position closed.`)
+      : `❌ *${side} FAILED*\n\n` +
+        `🪙 Token: ${symbol}\n` +
+        `Reason: ${details.error ?? 'Unknown error'}`;
+
+    await this.sendMessage(message);
+  }
+
+  async sendSellResult(
+    symbol: string,
+    success: boolean,
+    details: { bundleId?: string; error?: string; solReceived?: number; exitPriceUsd?: number; pnlPct?: number; side?: 'SELL' }
   ): Promise<void> {
     const message = success
-      ? `✅ *TRADE EXECUTED*\n\n` +
+      ? `✅ *SELL EXECUTED*\n\n` +
         `🪙 Token: ${symbol}\n` +
-        `💰 Amount: ${details.amountSol} SOL\n` +
-        (details.bundleId ? `📦 Bundle: ${details.bundleId.slice(0, 12)}...\n` : '') +
-        `\n⚠️ *Monitor posisi — exit manual saat RSI puncak*`
-      : `❌ *TRADE FAILED*\n\n` +
+        (details.solReceived ? `💰 SOL received: ~${details.solReceived.toFixed(4)} SOL\n` : '') +
+        (details.exitPriceUsd ? `💵 Exit price: $${details.exitPriceUsd.toFixed(8)}\n` : '') +
+        (details.pnlPct !== undefined ? `📊 PnL: ${details.pnlPct >= 0 ? '+' : ''}${details.pnlPct.toFixed(2)}%\n` : '') +
+        (details.bundleId ? `📦 Bundle: ${details.bundleId.slice(0, 12)}...\n` : '')
+      : `❌ *SELL FAILED*\n\n` +
         `🪙 Token: ${symbol}\n` +
         `Reason: ${details.error ?? 'Unknown error'}`;
 
@@ -508,7 +612,12 @@ export class TelegramBot {
       `${urgency[reason] ?? ''}\n\n` +
       `🔗 [DexScreener](https://dexscreener.com/solana/${position.tokenAddress})`;
 
-    await this.sendMessage(text);
+    const keyboard = Markup.inlineKeyboard([
+      [Markup.button.callback(`🔴 SELL NOW ${position.symbol}`, `SELL_${position.id}`)],
+      [Markup.button.callback('✖️ DISMISS', 'DISMISS_EXIT')],
+    ]);
+
+    await this.sendMessageWithKeyboard(text, keyboard);
     logger.info(MODULE, `Exit alert: ${position.symbol} [${reason}] PnL:${pnlStr}`);
   }
 
@@ -523,6 +632,18 @@ export class TelegramBot {
     }
   }
 
+  private async sendMessageWithKeyboard(text: string, keyboard: any): Promise<void> {
+    try {
+      await this.bot.telegram.sendMessage(config.telegram.chatId, text, {
+        parse_mode: 'Markdown',
+        link_preview_options: { is_disabled: true },
+        ...keyboard,
+      } as Parameters<typeof this.bot.telegram.sendMessage>[2]);
+    } catch (err) {
+      logger.error(MODULE, 'sendMessageWithKeyboard failed', err);
+    }
+  }
+
   async launch(): Promise<void> {
     try {
       await this.bot.telegram.setMyCommands([
@@ -531,6 +652,7 @@ export class TelegramBot {
         { command: 'positions',  description: '📂 Open positions' },
         { command: 'missed',     description: '⏭ Signal yang terlewat' },
         { command: 'scan',       description: '🔍 Trigger scan manual' },
+        { command: 'sell',       description: '🔴 Jual position (manual)' },
         { command: 'dryreport',  description: '📝 Laporan paper trading' },
         { command: 'help',       description: '❓ Panduan singkat' },
         { command: 'ping',       description: '🏓 Cek bot masih hidup' },
