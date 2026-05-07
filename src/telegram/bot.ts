@@ -13,6 +13,29 @@ import type { TradeExecutor } from '../execution/executor';
 
 const MODULE = 'TELEGRAM';
 
+// ── Markdown Escape Helpers ──────────────────────────────────
+// Telegram MarkdownV2 requires escaping: _ * [ ] ( ) ~ ` > # + - = | { } . !
+// We use basic 'Markdown' mode, but [text](url) syntax must be valid.
+// Escape brackets and underscores in token names/addresses to avoid parse errors.
+
+function escapeMarkdown(text: string): string {
+  if (!text) return '';
+  return text
+    .replace(/_/g, '\\_')
+    .replace(/\[/g, '\\[')
+    .replace(/\]/g, '\\]')
+    .replace(/\(/g, '\\(')
+    .replace(/\)/g, '\\)')
+    .replace(/~/g, '\\~')
+    .replace(/`/g, '\\`')
+    .replace(/>/g, '\\>');
+}
+
+// Escape ONLY inside link text, not URL itself
+function safeSymbol(symbol: string): string {
+  return escapeMarkdown(symbol);
+}
+
 // TTL bisa dikonfigurasi — default 10 menit
 const APPROVAL_TTL_MS = parseInt(process.env.APPROVAL_TTL_MINUTES ?? '10') * 60 * 1000;
 const REMINDER_AT_MS  = Math.floor(APPROVAL_TTL_MS / 2);
@@ -280,7 +303,7 @@ export class TelegramBot {
     // Build keyboard: SELL button for each position + Refresh
     const buttons: any[] = [];
     for (const pos of open.slice(0, 8)) { // max 8 sell buttons (Telegram limit)
-      buttons.push([Markup.button.callback(`🔴 SELL ${pos.symbol}`, `SELL_${pos.id}`)]);
+      buttons.push([Markup.button.callback(`🔴 SELL ${safeSymbol(pos.symbol)}`, `SELL_${pos.id}`)]);
     }
     buttons.push([Markup.button.callback('🔄 Refresh', 'SHOW_POSITIONS')]);
     const keyboard = Markup.inlineKeyboard(buttons);
@@ -302,10 +325,18 @@ export class TelegramBot {
       return;
     }
     const report = this.dryRunExecutor?.generateReport() ?? '📭 Dry run executor belum siap.';
-    await ctx.reply(report, {
-      parse_mode: 'Markdown',
-      link_preview_options: { is_disabled: true },
-    });
+    try {
+      await ctx.reply(report, {
+        parse_mode: 'Markdown',
+        link_preview_options: { is_disabled: true },
+      });
+    } catch (err) {
+      // Markdown parse error — fallback to plain text
+      logger.warn(MODULE, 'Markdown parse error in dry report, sending plain text');
+      await ctx.reply(report, {
+        link_preview_options: { is_disabled: true },
+      });
+    }
   }
 
   private async handleMissed(ctx: Context): Promise<void> {
@@ -497,11 +528,14 @@ export class TelegramBot {
     const tokenAgeMin = Math.floor((token.ageSeconds % 3600) / 60);
     const confEmoji   = ({ HIGH: '🔥', MEDIUM: '⚡', LOW: '💡' } as Record<string,string>)[signal.confidence];
 
+    const safeSymbolStr = safeSymbol(token.symbol);
+    const safeNameStr = safeSymbol(token.name);
+
     const message =
-      (isDryRun ? `🧪 *[DRY RUN] SIGNAL ALERT*\n` : '') +
+      (isDryRun ? `🧪 *DRY RUN — SIGNAL ALERT*\n` : '') +
       `🎯 *SIGNAL - ${signal.confidence} CONFIDENCE* ${confEmoji}\n` +
       `━━━━━━━━━━━━━━━━━━━━━\n\n` +
-      `🪙 *${token.symbol}* (${token.name})\n` +
+      `🪙 *${safeSymbolStr}* (${safeNameStr})\n` +
       `📊 MCap: $${formatNumber(token.mcapUsd)}\n` +
       `💧 Liquidity: $${formatNumber(token.liquidityUsd)}\n` +
       `⚡ Fee: ${token.globalFeeSol.toFixed(1)} SOL\n` +
@@ -551,15 +585,16 @@ export class TelegramBot {
     details: { amountSol?: number; txSignature?: string; bundleId?: string; error?: string; side?: 'BUY' | 'SELL' }
   ): Promise<void> {
     const side = details.side ?? 'BUY';
+    const safeSym = safeSymbol(symbol);
     const message = success
       ? `✅ *${side} EXECUTED*\n\n` +
-        `🪙 Token: ${symbol}\n` +
+        `🪙 Token: ${safeSym}\n` +
         (details.amountSol ? `💰 Amount: ${details.amountSol} SOL\n` : '') +
         (details.bundleId ? `📦 Bundle: ${details.bundleId.slice(0, 12)}...\n` : '') +
         (side === 'BUY' ? `\n⚠️ *Monitor posisi — exit manual saat RSI puncak*` : `\n📊 Position closed.`)
       : `❌ *${side} FAILED*\n\n` +
-        `🪙 Token: ${symbol}\n` +
-        `Reason: ${details.error ?? 'Unknown error'}`;
+        `🪙 Token: ${safeSym}\n` +
+        `Reason: ${escapeMarkdown(details.error ?? 'Unknown error')}`;
 
     await this.sendMessage(message);
   }
@@ -569,16 +604,17 @@ export class TelegramBot {
     success: boolean,
     details: { bundleId?: string; error?: string; solReceived?: number; exitPriceUsd?: number; pnlPct?: number; side?: 'SELL' }
   ): Promise<void> {
+    const safeSym = safeSymbol(symbol);
     const message = success
       ? `✅ *SELL EXECUTED*\n\n` +
-        `🪙 Token: ${symbol}\n` +
+        `🪙 Token: ${safeSym}\n` +
         (details.solReceived ? `💰 SOL received: ~${details.solReceived.toFixed(4)} SOL\n` : '') +
         (details.exitPriceUsd ? `💵 Exit price: $${details.exitPriceUsd.toFixed(8)}\n` : '') +
         (details.pnlPct !== undefined ? `📊 PnL: ${details.pnlPct >= 0 ? '+' : ''}${details.pnlPct.toFixed(2)}%\n` : '') +
         (details.bundleId ? `📦 Bundle: ${details.bundleId.slice(0, 12)}...\n` : '')
       : `❌ *SELL FAILED*\n\n` +
-        `🪙 Token: ${symbol}\n` +
-        `Reason: ${details.error ?? 'Unknown error'}`;
+        `🪙 Token: ${safeSym}\n` +
+        `Reason: ${escapeMarkdown(details.error ?? 'Unknown error')}`;
 
     await this.sendMessage(message);
   }
@@ -586,6 +622,7 @@ export class TelegramBot {
   async sendExitSignalAlert(signal: ExitSignal): Promise<void> {
     const { position, reason, pnlPct, stochRsiK, stochRsiD } = signal;
     const pnlStr = `${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%`;
+    const safeSym = safeSymbol(position.symbol);
 
     const headers: Record<string, string> = {
       RSI_PEAK:        '📈 *RSI PEAK — PERTIMBANGKAN JUAL*',
@@ -609,7 +646,7 @@ export class TelegramBot {
 
     const text =
       `${headers[reason] ?? reason}\n\n` +
-      `🪙 *${position.symbol}*\n` +
+      `🪙 *${safeSym}*\n` +
       `💰 PnL: ${pnlStr}\n` +
       `📥 Entry: $${position.entryPriceUsd.toFixed(8)}\n` +
       `💵 Sekarang: $${signal.currentPrice.toFixed(8)}\n` +
@@ -619,7 +656,7 @@ export class TelegramBot {
       `🔗 [DexScreener](https://dexscreener.com/solana/${position.tokenAddress})`;
 
     const keyboard = Markup.inlineKeyboard([
-      [Markup.button.callback(`🔴 SELL NOW ${position.symbol}`, `SELL_${position.id}`)],
+      [Markup.button.callback(`🔴 SELL NOW ${safeSym}`, `SELL_${position.id}`)],
       [Markup.button.callback('✖️ DISMISS', 'DISMISS_EXIT')],
     ]);
 

@@ -109,28 +109,17 @@ export class DryRunExecutor {
     this.riskManager.addPosition(position);
 
     // Kirim notif ke Telegram
+    const safeSym = token.symbol.replace(/_/g, '\\_');
     await this.telegramBot.sendMessage(
-      `📝 *[DRY RUN] PAPER TRADE SIMULATED*
-
-` +
-      `🪙 *${token.symbol}*
-` +
-      `💰 Size: ${tradeParams.amountSol} SOL (paper)
-` +
-      `📊 Entry price: $${entryPriceUsd.toFixed(8)}
-` +
-      `📉 Price impact: ${quoteResult.priceImpactPct.toFixed(3)}% ✅
-` +
-      `⚡ Slippage: ${tradeParams.slippagePct}%
-` +
-      `🔧 Est fee: ${simulationResult.estimatedFeeSOL.toFixed(6)} SOL
-` +
-      `📈 Signal: EMA${signal.emaTouched} | RSI K:${signal.stochRsiK.toFixed(1)} | ${signal.confidence}
-
-` +
-      `🔗 [DexScreener](https://dexscreener.com/solana/${token.address})
-
-` +
+      `📝 *DRY RUN — PAPER TRADE SIMULATED*\n\n` +
+      `🪙 *${safeSym}*\n` +
+      `💰 Size: ${tradeParams.amountSol} SOL (paper)\n` +
+      `📊 Entry price: $${entryPriceUsd.toFixed(8)}\n` +
+      `📉 Price impact: ${quoteResult.priceImpactPct.toFixed(3)}% ✅\n` +
+      `⚡ Slippage: ${tradeParams.slippagePct}%\n` +
+      `🔧 Est fee: ${simulationResult.estimatedFeeSOL.toFixed(6)} SOL\n` +
+      `📈 Signal: EMA${signal.emaTouched} | RSI K:${signal.stochRsiK.toFixed(1)} | ${signal.confidence}\n\n` +
+      `🔗 [DexScreener](https://dexscreener.com/solana/${token.address})\n\n` +
       `_Tidak ada transaksi nyata. Mode: DRY RUN_`
     );
 
@@ -186,6 +175,9 @@ export class DryRunExecutor {
     const open   = all.filter((t) => t.status === 'OPEN');
     const closed = all.filter((t) => t.status === 'CLOSED');
 
+    // Helper escape markdown
+    const esc = (s: string) => s.replace(/_/g, '\\_').replace(/\[/g, '\\[').replace(/\]/g, '\\]');
+
     let report = `📝 *DRY RUN REPORT*\n`;
     report += `_Semua ini adalah simulasi — tidak ada transaksi nyata_\n\n`;
 
@@ -194,9 +186,9 @@ export class DryRunExecutor {
       report += `*🟢 Open (${open.length})*\n`;
       for (const t of open) {
         const age = Math.floor((Date.now() - t.entryTimestamp) / 60000);
-        report += `• *${t.symbol}* | ${t.amountSol} SOL | ${age}m\n`;
+        report += `• *${esc(t.symbol)}* | ${t.amountSol} SOL | ${age}m\n`;
         report += `  Entry: $${t.entryPriceUsd.toFixed(8)} | Impact: ${t.priceImpactPct.toFixed(2)}%\n`;
-        report += `  Signal: EMA${t.emaTouched} RSI:${t.stochRsiK.toFixed(0)} [${t.signalConfidence}]\n`;
+        report += `  Signal: EMA${t.emaTouched} RSI:${t.stochRsiK.toFixed(0)} \[${t.signalConfidence}\]\n`;
       }
       report += '\n';
     }
@@ -212,7 +204,7 @@ export class DryRunExecutor {
 
       for (const t of closed) {
         const pnlStr = `${(t.pnlPct ?? 0) >= 0 ? '✅ +' : '❌ '}${(t.pnlPct ?? 0).toFixed(2)}%`;
-        report += `• *${t.symbol}* ${pnlStr}\n`;
+        report += `• *${esc(t.symbol)}* ${pnlStr}\n`;
       }
     }
 

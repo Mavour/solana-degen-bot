@@ -12,20 +12,36 @@ const MODULE = 'GMGN';
 export const WSOL = 'So11111111111111111111111111111111111111112';
 
 // Browser-like headers untuk bypass bot detection
-const BROWSER_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Accept': 'application/json, text/plain, */*',
-  'Accept-Language': 'en-US,en;q=0.9',
-  'Accept-Encoding': 'gzip, deflate, br',
-  'Referer': 'https://gmgn.ai/',
-  'Origin': 'https://gmgn.ai',
-  'sec-ch-ua': '"Chromium";v="124", "Google Chrome";v="124"',
-  'sec-ch-ua-mobile': '?0',
-  'sec-ch-ua-platform': '"Windows"',
-  'Sec-Fetch-Dest': 'empty',
-  'Sec-Fetch-Mode': 'cors',
-  'Sec-Fetch-Site': 'same-origin',
-};
+const USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+];
+
+function getRandomUserAgent(): string {
+  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+}
+
+function getBrowserHeaders(): Record<string, string> {
+  return {
+    'User-Agent': getRandomUserAgent(),
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'en-US,en;q=0.9,id;q=0.8',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Referer': 'https://gmgn.ai/?chain=sol',
+    'Origin': 'https://gmgn.ai',
+    'sec-ch-ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': '"Windows"',
+    'Sec-Fetch-Dest': 'empty',
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Site': 'same-origin',
+    'DNT': '1',
+    'Connection': 'keep-alive',
+    'Pragma': 'no-cache',
+    'Cache-Control': 'no-cache',
+  };
+}
 
 export class GMGNScanner {
   private client: AxiosInstance;
@@ -34,11 +50,23 @@ export class GMGNScanner {
     this.client = axios.create({
       baseURL: 'https://gmgn.ai',
       timeout: 20000,
-      headers: BROWSER_HEADERS,
+      headers: getBrowserHeaders(),
+      withCredentials: true,
     });
 
+    // Cookie jar sederhana
+    const cookieJar: string[] = [];
+
     this.client.interceptors.response.use(
-      (res) => res,
+      (res) => {
+        // Simpan cookie dari response untuk request berikutnya
+        const setCookie = res.headers['set-cookie'];
+        if (setCookie) {
+          cookieJar.push(...setCookie);
+          this.client.defaults.headers['Cookie'] = cookieJar.join('; ');
+        }
+        return res;
+      },
       (err) => {
         const status = err.response?.status;
         const url = err.config?.url;
