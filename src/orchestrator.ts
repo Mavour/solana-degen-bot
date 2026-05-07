@@ -305,13 +305,19 @@ export class BotOrchestrator {
       this.runScanCycle().catch((e) => logger.error(MODULE, 'Scan cron error', e));
     });
 
-    // Jadwal monitor position (tiap 2 menit)
-    this.monitorTask = cron.schedule('*/2 * * * *', () => {
-      this.runMonitorCycle().catch((e) => logger.error(MODULE, 'Monitor cron error', e));
-    });
+    // Monitor position — pakai setInterval bukan cron (lebih reliable)
+    // Jalan tiap 2 menit = 120,000 ms
+    const monitorInterval = setInterval(() => {
+      this.runMonitorCycle().catch((e) => logger.error(MODULE, 'Monitor error', e));
+    }, 120_000);
+
+    // Simpan reference untuk cleanup saat stop
+    this.monitorTask = {
+      stop: () => clearInterval(monitorInterval),
+    } as unknown as cron.ScheduledTask;
 
     this.isRunning = true;
-    logger.info(MODULE, `✅ Live | scan/${config.scanning.intervalSeconds}s monitor/120s`);
+    logger.info(MODULE, `✅ Live | scan/${config.scanning.intervalSeconds}s | monitor/120s (setInterval)`);
 
     // Initial scan langsung
     await sleep(2000);
