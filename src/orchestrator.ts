@@ -187,42 +187,58 @@ export class BotOrchestrator {
     if (!openPositions.length || this.isMonitorInProgress) return;
     this.isMonitorInProgress = true;
 
-    logger.debug(MODULE, `👁 Monitoring ${openPositions.length} position(s)`);
+    logger.info(MODULE, `👁 Monitor: ${openPositions.length} position(s)`);
 
     try {
       const priceMap = new Map<string, number>();
       const ohlcvMap = new Map<string, OHLCVCandle[]>();
 
       for (const pos of openPositions) {
+        let priceFound = false;
+
+        // Step 1: coba GMGN dulu
         try {
-          // Primary: GMGN — dapat harga + OHLCV untuk RSI calculation
           const detail = await this.gmgnScanner.fetchTokenDetail(pos.tokenAddress);
-          if (detail) {
+          if (detail && detail.priceUsd > 0) {
             priceMap.set(pos.tokenAddress, detail.priceUsd);
-            if (detail.ohlcv.length >= 40) {
-              ohlcvMap.set(pos.tokenAddress, detail.ohlcv);
-            }
+            if (detail.ohlcv.length >= 40) ohlcvMap.set(pos.tokenAddress, detail.ohlcv);
+            priceFound = true;
+            logger.info(MODULE, `Price OK (GMGN): ${pos.symbol} $${detail.priceUsd}`);
           }
         } catch {
-          // Fallback: DexScreener — harga saja (tanpa OHLCV, RSI dari % PnL check saja)
+          // GMGN gagal — lanjut ke DS
+        }
+
+        // Step 2: DexScreener fallback kalau GMGN null/gagal
+        if (!priceFound) {
           try {
             const pairs = await this.dsScanner.fetchTokensByAddress([pos.tokenAddress]);
-            if (pairs.length) {
-              const price = parseFloat(pairs[0].priceUsd ?? '0');
-              if (price > 0) priceMap.set(pos.tokenAddress, price);
+            // pairs bisa array DSPair atau array dengan priceUsd field
+            const pair = pairs[0] as any;
+            const price = parseFloat(pair?.priceUsd ?? pair?.price_usd ?? '0');
+            if (price > 0) {
+              priceMap.set(pos.tokenAddress, price);
+              priceFound = true;
+              logger.info(MODULE, `Price OK (DS): ${pos.symbol} $${price}`);
             }
           } catch {
             logger.warn(MODULE, `Price fetch failed: ${pos.symbol}`);
           }
         }
 
-        await sleep(2500); // hormati GMGN rate limit
+        if (!priceFound) {
+          logger.warn(MODULE, `No price for ${pos.symbol} — PnL tidak bisa dihitung`);
+        }
+
+        await sleep(1000); // rate limit friendly
       }
 
-      // Update harga di RiskManager supaya /positions tampilkan PnL realtime
+      logger.info(MODULE, `Monitor: ${priceMap.size}/${openPositions.length} prices updated`);
+
+      // Update harga di RiskManager supaya /positions tampilkan PnL
       this.riskManager.updatePrices(priceMap);
 
-      // Pass ke RiskManager — evaluasi RSI peak + SL + TP
+      // Evaluasi exit signals — RSI peak + SL + TP
       this.riskManager.checkExitSignals(priceMap, ohlcvMap);
 
     } catch (err) {
