@@ -49,6 +49,8 @@ export const config = {
   gmgn: {
     baseUrl: optionalEnv('GMGN_BASE_URL', 'https://gmgn.ai'),
     apiKey: optionalEnv('GMGN_API_KEY', ''),
+    // Session cookie dari browser untuk bypass 403 (lihat scripts/get-gmgn-session.js)
+    sessionCookie: optionalEnv('GMGN_SESSION_COOKIE', ''),
   },
   trading: {
     maxTradeSol: parseFloat(optionalEnv('MAX_TRADE_SOL', '0.1')),
@@ -66,10 +68,14 @@ export const config = {
   },
   scanning: {
     // 180 detik (3 menit) — aman untuk GMGN free tier.
-    // Argumen: token >1 jam umurnya, EMA/RSI setup butuh beberapa candle.
-    // Signal valid tidak hilang dalam 60 detik. 3 menit cukup responsif.
-    // Kalau pakai premium RPC + GMGN key, bisa turunkan ke 60.
     intervalSeconds: parseInt(optionalEnv('SCAN_INTERVAL_SECONDS', '180')),
+  },
+  monitor: {
+    // 120 detik (2 menit) — monitor open positions.
+    intervalSeconds: parseInt(optionalEnv('MONITOR_INTERVAL_SECONDS', '120')),
+  },
+  proxy: {
+    url: optionalEnv('PROXY_URL', ''),
   },
   risk: {
     maxOpenPositions: parseInt(optionalEnv('MAX_OPEN_POSITIONS', '3')),

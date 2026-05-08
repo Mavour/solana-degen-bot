@@ -23,7 +23,7 @@ function getRandomUserAgent(): string {
 }
 
 function getBrowserHeaders(): Record<string, string> {
-  return {
+  const headers: Record<string, string> = {
     'User-Agent': getRandomUserAgent(),
     'Accept': 'application/json, text/plain, */*',
     'Accept-Language': 'en-US,en;q=0.9,id;q=0.8',
@@ -41,18 +41,43 @@ function getBrowserHeaders(): Record<string, string> {
     'Pragma': 'no-cache',
     'Cache-Control': 'no-cache',
   };
+
+  // Inject session cookie kalau ada di .env
+  if (config.gmgn.sessionCookie) {
+    headers['Cookie'] = config.gmgn.sessionCookie;
+  }
+
+  return headers;
 }
 
 export class GMGNScanner {
   private client: AxiosInstance;
 
   constructor() {
-    this.client = axios.create({
+    const axiosConfig: Record<string, any> = {
       baseURL: 'https://gmgn.ai',
       timeout: 20000,
       headers: getBrowserHeaders(),
       withCredentials: true,
-    });
+    };
+
+    // Proxy support (bypass IP block)
+    if (config.proxy.url) {
+      try {
+        const proxyUrl = new URL(config.proxy.url);
+        axiosConfig.proxy = {
+          protocol: proxyUrl.protocol.replace(':', ''),
+          host: proxyUrl.hostname,
+          port: parseInt(proxyUrl.port || (proxyUrl.protocol === 'https:' ? '443' : '80')),
+          auth: proxyUrl.username ? { username: proxyUrl.username, password: proxyUrl.password } : undefined,
+        };
+        logger.info(MODULE, `Using proxy: ${proxyUrl.hostname}:${proxyUrl.port}`);
+      } catch {
+        logger.warn(MODULE, `Invalid PROXY_URL format: ${config.proxy.url}`);
+      }
+    }
+
+    this.client = axios.create(axiosConfig);
 
     // Cookie jar sederhana
     const cookieJar: string[] = [];

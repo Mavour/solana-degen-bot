@@ -318,7 +318,7 @@ export class BotOrchestrator {
       `• Stop Loss: -${config.risk.stopLossPct}%\n` +
       `• RSI exit: K/D > 80 (Obicle method)\n` +
       `• Scan setiap: ${config.scanning.intervalSeconds / 60} menit\n` +
-      `• Monitor: tiap 2 menit\n\n` +
+      `• Monitor: tiap ${config.monitor.intervalSeconds / 60} menit\n\n` +
       `📡 Data: GMGN.ai → DexScreener (fallback)\n` +
       `🛡 Eksekusi: Jito Bundle (anti-MEV)\n\n` +
       `✅ Scanning...`
@@ -330,10 +330,10 @@ export class BotOrchestrator {
     });
 
     // Monitor position — pakai setInterval bukan cron (lebih reliable)
-    // Jalan tiap 2 menit = 120,000 ms
+    const monitorIntervalMs = config.monitor.intervalSeconds * 1000;
     const monitorInterval = setInterval(() => {
       this.runMonitorCycle().catch((e) => logger.error(MODULE, 'Monitor error', e));
-    }, 120_000);
+    }, monitorIntervalMs);
 
     // Simpan reference untuk cleanup saat stop
     this.monitorTask = {
