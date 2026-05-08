@@ -202,6 +202,9 @@ export class TelegramBot {
     this.bot.action(/^CANCEL_(.+)$/, async (ctx) => {
       await this.handleApproval(ctx, ctx.match[1], 'REJECTED');
     });
+    this.bot.action(/^REFRESH_APPROVAL_(.+)$/, async (ctx) => {
+      await this.handleRefreshApproval(ctx, ctx.match[1]);
+    });
 
     // SELL / CONFIRM SELL / CANCEL SELL callbacks
     this.bot.action(/^SELL_(.+)$/, async (ctx) => {
@@ -685,6 +688,69 @@ export class TelegramBot {
     }
   }
 
+  private async handleRefreshApproval(ctx: Context, approvalId: string): Promise<void> {
+    const request = this.pendingApprovals.get(approvalId);
+    if (!request) {
+      await ctx.answerCbQuery('❌ Request expired');
+      return;
+    }
+
+    await ctx.answerCbQuery('🔄 Refreshing price...');
+
+    const token = request.signal.token;
+    const freshPrice = await fetchFreshPriceUSD(token.address);
+
+    if (!freshPrice || freshPrice <= 0) {
+      await ctx.answerCbQuery('⚠️ Gagal refresh harga');
+      return;
+    }
+
+    // Update token price in request
+    request.signal.token.priceUsd = freshPrice;
+
+    const isDryRun = config.dryRun;
+    const ttlMin = Math.floor(APPROVAL_TTL_MS / 60000);
+    const ageMin = Math.floor((Date.now() - request.timestamp) / 60000);
+    const remainMin = ttlMin - ageMin;
+    const confEmoji = ({ HIGH: '🔥', MEDIUM: '⚡', LOW: '💡' } as Record<string,string>)[request.signal.confidence];
+    const safeSymbolStr = safeSymbol(token.symbol);
+
+    const tokenAgeH = Math.floor(token.ageSeconds / 3600);
+    const tokenAgeM = Math.floor((token.ageSeconds % 3600) / 60);
+
+    const updatedMessage =
+      (isDryRun ? `🧪 *DRY RUN* ` : '') +
+      `🎯 *${request.signal.confidence}* ${confEmoji} | *${safeSymbolStr}*\n` +
+      `📊 $${formatNumber(token.mcapUsd)} | 💧 $${formatNumber(token.liquidityUsd)} | 🕐 ${tokenAgeH}h${tokenAgeM}m\n` +
+      `💵 *Price refreshed: $${freshPrice.toFixed(8)}*\n\n` +
+      `📈 EMA${request.signal.emaTouched} Touch ✅ | RSI K:${request.signal.stochRsiK.toFixed(1)} D:${request.signal.stochRsiD.toFixed(1)} | ${request.signal.stochRsiBottoming ? '📉 BOTTOMING' : '➖ Normal'}\n\n` +
+      `💰 ${request.tradeParams.amountSol} SOL${isDryRun ? ' paper' : ''} | Slippage ${request.tradeParams.slippagePct}% | Impact ${request.quoteResult.priceImpactPct.toFixed(2)}%\n` +
+      `🔗 [DexScreener](https://dexscreener.com/solana/${token.address}) | [GMGN](https://gmgn.ai/sol/token/${token.address})\n\n` +
+      (isDryRun
+        ? `_⏰ ${remainMin}min remaining — Klik SIMULATE atau SKIP_`
+        : `⏰ ${remainMin}min remaining — Klik APPROVE atau CANCEL`);
+
+    const approveLabel = isDryRun
+      ? `🧪 SIMULATE (${request.tradeParams.amountSol} SOL paper)`
+      : `✅ APPROVE BUY (${request.tradeParams.amountSol} SOL)`;
+
+    const keyboard = Markup.inlineKeyboard([
+      [Markup.button.callback(approveLabel, `APPROVE_${approvalId}`)],
+      [Markup.button.callback('❌ CANCEL', `CANCEL_${approvalId}`)],
+      [Markup.button.callback('🔄 Refresh Price', `REFRESH_APPROVAL_${approvalId}`)],
+    ]);
+
+    try {
+      await ctx.editMessageText(updatedMessage, {
+        parse_mode: 'Markdown',
+        ...keyboard,
+        link_preview_options: { is_disabled: true },
+      });
+    } catch (err) {
+      logger.error(MODULE, 'Failed to refresh approval message', err);
+    }
+  }
+
   // ── Public API ────────────────────────────────────────────────
 
   onApprove(callback: ApprovalCallback): void {
@@ -741,31 +807,24 @@ export class TelegramBot {
 
       logger.info(MODULE, `Signal expired (${ttlMin}min): ${token.symbol}`);
 
-      // Hapus message signal yang expired — bersihkan chat dari tombol yang tidak valid
+      // Edit pesan signal jadi EXPIRED (tanpa tombol) — user tau ini sudah expired
       if (req?.messageId) {
         try {
-          await this.bot.telegram.deleteMessage(config.telegram.chatId, req.messageId);
-          logger.debug(MODULE, `Deleted expired signal message: ${token.symbol}`);
+          await this.bot.telegram.editMessageText(
+            config.telegram.chatId,
+            req.messageId,
+            undefined,
+            (isDryRun ? `🧪 *DRY RUN* ` : '') +
+            `🎯 *${signal.confidence}* ${confEmoji} | *${safeSymbolStr}*\n` +
+            `📊 $${formatNumber(token.mcapUsd)} | 💧 $${formatNumber(token.liquidityUsd)} | 🕐 ${tokenAge}h${tokenAgeMin}m\n\n` +
+            `📈 EMA${signal.emaTouched} Touch ✅ | RSI K:${signal.stochRsiK.toFixed(1)} D:${signal.stochRsiD.toFixed(1)}\n\n` +
+            `⏰ *EXPIRED* — tidak direspons dalam ${ttlMin} menit.`,
+            { parse_mode: 'Markdown', link_preview_options: { is_disabled: true } }
+          );
         } catch {
-          // Kalau gagal hapus, edit jadi EXPIRED tanpa tombol
-          try {
-            await this.bot.telegram.editMessageText(
-              config.telegram.chatId,
-              req.messageId,
-              undefined,
-              (isDryRun ? `🧪 *DRY RUN* ` : '') +
-              `🎯 *${signal.confidence}* ${confEmoji} | *${safeSymbolStr}*\n` +
-              `📊 $${formatNumber(token.mcapUsd)} | 💧 $${formatNumber(token.liquidityUsd)} | 🕐 ${tokenAge}h${tokenAgeMin}m\n\n` +
-              `📈 EMA${signal.emaTouched} Touch ✅ | RSI K:${signal.stochRsiK.toFixed(1)} D:${signal.stochRsiD.toFixed(1)}\n\n` +
-              `⏰ *EXPIRED* — tidak direspons dalam ${ttlMin} menit.`,
-              { parse_mode: 'Markdown', link_preview_options: { is_disabled: true } }
-            );
-          } catch {
-            // Ignore edit errors
-          }
+          // Ignore edit errors
         }
       }
-      // Nggak kirim notifikasi expired terpisah — cukup hapus/edit pesan asli
     }, APPROVAL_TTL_MS);
 
     // ── Build alert message ───────────────────────────────────
@@ -795,6 +854,7 @@ export class TelegramBot {
     const keyboard = Markup.inlineKeyboard([
       [Markup.button.callback(approveLabel, `APPROVE_${approvalId}`)],
       [Markup.button.callback('❌ CANCEL', `CANCEL_${approvalId}`)],
+      [Markup.button.callback('🔄 Refresh Price', `REFRESH_APPROVAL_${approvalId}`)],
     ]);
 
     try {
