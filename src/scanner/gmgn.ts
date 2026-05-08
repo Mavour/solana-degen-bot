@@ -88,6 +88,15 @@ export class GMGNScanner {
     // Cookie jar sederhana
     const cookieJar: string[] = [];
 
+    // Auto-inject API key ke semua request sebagai query param
+    this.client.interceptors.request.use((req) => {
+      if (config.gmgn.apiKey) {
+        req.params = req.params || {};
+        req.params.api_key = config.gmgn.apiKey;
+      }
+      return req;
+    });
+
     this.client.interceptors.response.use(
       (res) => {
         // Simpan cookie dari response untuk request berikutnya
