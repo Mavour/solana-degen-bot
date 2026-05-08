@@ -214,6 +214,11 @@ export class TelegramBot {
       await ctx.editMessageText('⚠️ Exit alert di-dismiss. Ketik /sell <SYMBOL> kapan saja untuk jual manual.').catch(() => {});
     });
 
+    // Refresh exit alert price
+    this.bot.action(/^REFRESH_EXIT_(.+)$/, async (ctx) => {
+      await this.handleRefreshExit(ctx, ctx.match[1]);
+    });
+
     // Inline refresh callbacks
     this.bot.action('STATUS_REFRESH', async (ctx) => {
       await ctx.answerCbQuery('Refreshing...');
@@ -331,6 +336,69 @@ export class TelegramBot {
       logger.error(MODULE, `Sell callback error for ${position.symbol}`, err);
       await this.sendMessage(`❌ *SELL ERROR*\n${safeSymbol(position.symbol)}\n${escapeMarkdown(String(err))}`);
     }
+  }
+
+  /**
+   * Refresh exit alert price — dipanggil saat klik 🔄 Refresh di exit alert
+   */
+  private async handleRefreshExit(ctx: Context, positionId: string): Promise<void> {
+    const position = this.riskManager.getOpenPositions().find(p => p.id === positionId);
+    if (!position) {
+      await ctx.answerCbQuery('❌ Position sudah ditutup');
+      return;
+    }
+
+    await ctx.answerCbQuery('🔄 Refreshing...');
+
+    // Fetch fresh price
+    const freshPrice = await fetchFreshPriceUSD(position.tokenAddress);
+    const currentPrice = freshPrice ?? this.riskManager.getLastKnownPrice(position.tokenAddress) ?? position.entryPriceUsd;
+
+    const pnlPct = position.entryPriceUsd > 0
+      ? ((currentPrice - position.entryPriceUsd) / position.entryPriceUsd) * 100
+      : 0;
+    const pnlStr = `${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%`;
+    const pnlEmoji = pnlPct >= 0 ? '📈' : '📉';
+    const safeSym = safeSymbol(position.symbol);
+    const holdMin = Math.floor((Date.now() - position.entryTimestamp) / 60000);
+
+    // Rebuild text sama seperti sendExitSignalAlert tapi dengan harga baru
+    const headers: Record<string, string> = {
+      RSI_PEAK:        '📈 *RSI PEAK — PERTIMBANGKAN JUAL*',
+      RSI_DROP:        '📉 *RSI TURUN DARI PEAK — MOMENTUM BERBALIK*',
+      STOP_LOSS_PCT:   '🚨 *STOP LOSS — JUAL SEGERA*',
+      TAKE_PROFIT_PCT: '🎯 *TARGET PROFIT TERCAPAI*',
+    };
+
+    const urgency: Record<string, string> = {
+      RSI_PEAK:        '💡 Exit sekarang atau tunggu konfirmasi RSI drop',
+      RSI_DROP:        '⚠️ Momentum sudah berbalik — pertimbangkan exit',
+      STOP_LOSS_PCT:   '🔴 *Loss melebihi threshold — exit manual segera*',
+      TAKE_PROFIT_PCT: '💡 Tunggu RSI peak >80 untuk exit optimal',
+    };
+
+    const text =
+      `${headers[pnlPct <= -config.risk.stopLossPct ? 'STOP_LOSS_PCT' : pnlPct >= config.risk.takeProfitPct ? 'TAKE_PROFIT_PCT' : 'RSI_PEAK'] ?? '📊 *EXIT ALERT*'}\n\n` +
+      `🪙 *${safeSym}*\n` +
+      `💰 PnL: ${pnlEmoji} ${pnlStr}\n` +
+      `📥 Entry: $${position.entryPriceUsd.toFixed(8)}\n` +
+      `💵 *Sekarang: $${currentPrice.toFixed(8)}*\n` +
+      `⏱ Hold: ${holdMin}m\n\n` +
+      `${freshPrice ? '_✅ Harga di-refresh_' : '_⚠️ Harga dari cache_'}\n\n` +
+      `${urgency[pnlPct <= -config.risk.stopLossPct ? 'STOP_LOSS_PCT' : 'RSI_PEAK'] ?? ''}\n\n` +
+      `🔗 [DexScreener](https://dexscreener.com/solana/${position.tokenAddress})`;
+
+    const keyboard = Markup.inlineKeyboard([
+      [Markup.button.callback(`🔴 SELL NOW ${safeSym}`, `SELL_${position.id}`)],
+      [Markup.button.callback('🔄 Refresh Price', `REFRESH_EXIT_${position.id}`)],
+      [Markup.button.callback('✖️ DISMISS', 'DISMISS_EXIT')],
+    ]);
+
+    await ctx.editMessageText(text, {
+      parse_mode: 'Markdown',
+      ...keyboard,
+      link_preview_options: { is_disabled: true },
+    }).catch(() => {});
   }
 
   // ── Shared handlers ──────────────────────────────────────────
@@ -736,6 +804,7 @@ export class TelegramBot {
 
     const keyboard = Markup.inlineKeyboard([
       [Markup.button.callback(`🔴 SELL NOW ${safeSym}`, `SELL_${position.id}`)],
+      [Markup.button.callback('🔄 Refresh Price', `REFRESH_EXIT_${position.id}`)],
       [Markup.button.callback('✖️ DISMISS', 'DISMISS_EXIT')],
     ]);
 
