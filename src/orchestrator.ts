@@ -343,9 +343,11 @@ export class BotOrchestrator {
     this.isRunning = true;
     logger.info(MODULE, `✅ Live | scan/${config.scanning.intervalSeconds}s | monitor/120s (setInterval)`);
 
-    // Initial scan langsung
+    // Initial scan + monitor langsung (supaya /positions punya harga setelah restart)
     await sleep(2000);
     this.runScanCycle().catch((e) => logger.error(MODULE, 'Initial scan error', e));
+    await sleep(3000);
+    this.runMonitorCycle().catch((e) => logger.error(MODULE, 'Initial monitor error', e));
   }
 
   async stop(signal?: string): Promise<void> {

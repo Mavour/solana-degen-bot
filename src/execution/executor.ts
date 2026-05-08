@@ -5,6 +5,7 @@ import {
   Connection,
   PublicKey,
 } from '@solana/web3.js';
+import axios from 'axios';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 import { WalletManager } from './wallet';
@@ -21,6 +22,26 @@ const MODULE = 'EXECUTOR';
 
 function generateId(): string {
   return `${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+}
+
+/**
+ * Fetch fresh price dari DexScreener — fallback kalau cache kosong (misal setelah restart)
+ */
+async function fetchFreshPriceUSD(tokenAddress: string): Promise<number | null> {
+  try {
+    const res = await axios.get(
+      `https://api.dexscreener.com/tokens/v1/solana/${tokenAddress}`,
+      { timeout: 8000, headers: { 'Accept': 'application/json' } }
+    );
+    const pairs = Array.isArray(res.data) ? res.data : (res.data?.pairs ?? []);
+    for (const p of pairs) {
+      const price = parseFloat(p.priceUsd ?? p.price_usd ?? '0');
+      if (price > 0) return price;
+    }
+  } catch (err) {
+    logger.debug(MODULE, `fetchFreshPrice failed for ${tokenAddress.slice(0, 8)}`);
+  }
+  return null;
 }
 
 export class TradeExecutor {
@@ -203,8 +224,10 @@ export class TradeExecutor {
     // ── DRY RUN INTERCEPT ──────────────────────────────────
     if (config.dryRun) {
       logger.info(MODULE, `🧪 [DRY RUN] Simulating sell: ${symbol}`);
-      // Use current known price or entry price as fallback
-      const exitPriceUsd = this.riskManager.getLastKnownPrice(tokenAddress) ?? position.entryPriceUsd;
+      // Selalu fetch harga fresh — jangan andalkan cache yang mungkin kosong setelah restart
+      const cachedPrice = this.riskManager.getLastKnownPrice(tokenAddress);
+      const freshPrice = cachedPrice ? null : await fetchFreshPriceUSD(tokenAddress);
+      const exitPriceUsd = cachedPrice ?? freshPrice ?? position.entryPriceUsd;
       this.dryRunExecutor.closePaperTrade(tokenAddress, exitPriceUsd);
       this.riskManager.closePosition(position.id, exitPriceUsd);
       await this.telegramBot.sendSellResult(symbol, true, {
