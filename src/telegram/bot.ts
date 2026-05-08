@@ -122,15 +122,15 @@ export class TelegramBot {
         `Scan: tiap *${scanMin} menit* | Monitor: tiap *${config.monitor.intervalSeconds / 60} menit*\n\n` +
         `*Command:*\n` +
         `/status — 📊 Status bot & scanner\n` +
-        `/positions — 📂 Open positions (+ live price)\n` +
-        `/signals — 📡 Pending signals (1 list)\n` +
+        `/positions — 📂 Open positions (+ harga live)\n` +
         `/settings — ⚙️ Ubah parameter trading\n` +
         `/scan — 🔍 Trigger scan manual\n` +
-        `/sell SYMBOL — 🔴 Jual position\n` +
         `/missed — ⏭ Signal terlewat\n` +
         `/dryreport — 📝 Laporan paper trading\n` +
         `/help — ❓ Panduan lengkap\n\n` +
-        `_Bot akan kirim alert signal ke chat ini._`,
+        `🛒 *Beli:* Klik tombol di alert signal\n` +
+        `🔴 *Jual:* Klik SELL di /positions atau di alert exit\n\n` +
+        `_Bot akan kirim alert signal & exit ke chat ini._`,
         { parse_mode: 'Markdown' }
       );
     });
@@ -145,7 +145,6 @@ export class TelegramBot {
     // Slash commands
     this.bot.command('status',    async (ctx) => this.handleStatus(ctx));
     this.bot.command('positions', async (ctx) => this.handlePositions(ctx));
-    this.bot.command('signals',   async (ctx) => this.handleSignals(ctx));
     this.bot.command('settings',  async (ctx) => this.handleSettings(ctx));
     this.bot.command('dryreport', async (ctx) => this.handleDryReport(ctx));
     this.bot.command('missed',    async (ctx) => this.handleMissed(ctx));
@@ -161,34 +160,6 @@ export class TelegramBot {
       } else {
         await ctx.reply('⚠️ Scanner belum siap.');
       }
-    });
-
-    // /sell <SYMBOL> — manual sell command
-    this.bot.command('sell', async (ctx) => {
-      const text = (ctx.message as any)?.text ?? '';
-      const parts = text.split(/\s+/);
-      const symbol = parts[1]?.toUpperCase().trim();
-
-      if (!symbol) {
-        await ctx.reply(
-          `⚠️ *Cara pakai:*\n` +
-          `\`/sell SYMBOL\`\n\n` +
-          `Contoh: \`/sell BONK\`\n` +
-          `Bot akan refresh harga dan kirim konfirmasi SELL.`,
-          { parse_mode: 'Markdown' }
-        );
-        return;
-      }
-
-      const open = this.riskManager.getOpenPositions();
-      const pos = open.find(p => p.symbol.toUpperCase() === symbol);
-      if (!pos) {
-        await ctx.reply(`❌ Tidak ada open position untuk *${safeSymbol(symbol)}*.\nCek /positions.`, { parse_mode: 'Markdown' });
-        return;
-      }
-
-      // Langsung trigger price refresh + confirm
-      await this.showSellConfirmation(ctx, pos);
     });
 
     // APPROVE / CANCEL inline button callbacks
@@ -620,11 +591,10 @@ export class TelegramBot {
       `1. Bot scan otomatis tiap ${config.scanning.intervalSeconds / 60} menit\n` +
       `2. Alert dikirim ke sini saat ada signal\n` +
       `3. Kamu klik SIMULATE/APPROVE atau CANCEL\n` +
-      `4. Ketik /signals untuk lihat semua pending signal dalam 1 list\n` +
-      `5. Kalau tidak ada respons dalam ${reminderMin} menit, bot kirim reminder\n` +
-      `6. Alert expired setelah ${ttlMin} menit — message asli di-edit jadi ⏰ EXPIRED\n` +
-      `7. Bot monitor RSI tiap 2 menit, alert lagi saat RSI peak lebih dari 80\n` +
-      `8. Klik SELL NOW di alert exit, atau ketik /sell SYMBOL untuk jual manual\n\n` +
+      `4. Kalau tidak ada respons dalam ${reminderMin} menit, bot kirim reminder\n` +
+      `5. Alert expired setelah ${ttlMin} menit — message asli di-edit jadi ⏰ EXPIRED\n` +
+      `6. Bot monitor RSI tiap 2 menit, alert lagi saat RSI peak lebih dari 80\n` +
+      `7. Klik SELL NOW di alert exit, atau di /positions untuk jual manual\n\n` +
       `*Entry signal (Obicle method):*\n` +
       `• Harga menyentuh EMA 25/50/100/200\n` +
       `• Stoch RSI di bawah 20 (bottoming)\n\n` +
@@ -1139,11 +1109,9 @@ export class TelegramBot {
         { command: 'start',      description: '🏠 Menu utama' },
         { command: 'status',     description: '📊 Status bot & scanner' },
         { command: 'positions',  description: '📂 Open positions' },
-        { command: 'signals',    description: '📡 Pending signals (1 list)' },
         { command: 'settings',   description: '⚙️ Ubah parameter trading' },
-        { command: 'missed',     description: '⏭ Signal yang terlewat' },
         { command: 'scan',       description: '🔍 Trigger scan manual' },
-        { command: 'sell',       description: '🔴 Jual position (manual)' },
+        { command: 'missed',     description: '⏭ Signal yang terlewat' },
         { command: 'dryreport',  description: '📝 Laporan paper trading' },
         { command: 'help',       description: '❓ Panduan singkat' },
         { command: 'ping',       description: '🏓 Cek bot masih hidup' },
