@@ -454,8 +454,29 @@ export class TelegramBot {
 
   private async handlePositions(ctx: Context): Promise<void> {
     const mode = config.dryRun ? ' *(DRY RUN)*' : '';
-    const summary = this.riskManager.getPositionSummary();
     const open = this.riskManager.getOpenPositions();
+
+    // Fetch fresh prices untuk semua open positions — jangan cuma baca cache
+    let tempMsg: any;
+    const freshPrices = new Map<string, number>();
+    if (open.length > 0) {
+      tempMsg = await ctx.reply('🔄 *Refresh harga...*', { parse_mode: 'Markdown' });
+      for (const pos of open) {
+        const price = await fetchFreshPriceUSD(pos.tokenAddress);
+        if (price && price > 0) {
+          freshPrices.set(pos.tokenAddress, price);
+        }
+      }
+      if (freshPrices.size > 0) {
+        this.riskManager.updatePrices(freshPrices);
+      }
+      // Hapus pesan "refreshing"
+      if (tempMsg?.message_id) {
+        await ctx.telegram.deleteMessage(ctx.chat!.id, tempMsg.message_id).catch(() => {});
+      }
+    }
+
+    const summary = this.riskManager.getPositionSummary();
 
     // Build keyboard: SELL button for each position + Refresh
     const buttons: any[] = [];
