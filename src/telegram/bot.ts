@@ -50,10 +50,15 @@ async function fetchFreshPriceUSD(tokenAddress: string): Promise<number | null> 
     const pairs = Array.isArray(res.data) ? res.data : (res.data?.pairs ?? []);
     for (const p of pairs) {
       const price = parseFloat(p.priceUsd ?? p.price_usd ?? '0');
-      if (price > 0) return price;
+      if (price > 0) {
+        logger.debug(MODULE, `fetchFreshPrice OK ${tokenAddress.slice(0, 8)}: $${price}`);
+        return price;
+      }
     }
-  } catch (err) {
-    logger.debug(MODULE, `fetchFreshPrice failed for ${tokenAddress.slice(0, 8)}`);
+    logger.warn(MODULE, `fetchFreshPrice no price for ${tokenAddress.slice(0, 8)}`);
+  } catch (err: any) {
+    const status = err.response?.status ?? 'no-resp';
+    logger.warn(MODULE, `fetchFreshPrice failed ${tokenAddress.slice(0, 8)}: HTTP ${status} | ${err.message}`);
   }
   return null;
 }
@@ -459,12 +464,17 @@ export class TelegramBot {
     // Fetch fresh prices untuk semua open positions — jangan cuma baca cache
     let tempMsg: any;
     const freshPrices = new Map<string, number>();
+    let fetchedCount = 0;
+    let failedCount = 0;
     if (open.length > 0) {
       tempMsg = await ctx.reply('🔄 *Refresh harga...*', { parse_mode: 'Markdown' });
       for (const pos of open) {
         const price = await fetchFreshPriceUSD(pos.tokenAddress);
         if (price && price > 0) {
           freshPrices.set(pos.tokenAddress, price);
+          fetchedCount++;
+        } else {
+          failedCount++;
         }
       }
       if (freshPrices.size > 0) {
@@ -478,6 +488,13 @@ export class TelegramBot {
 
     const summary = this.riskManager.getPositionSummary();
 
+    // Indikator harga fresh vs cache
+    const priceIndicator = open.length > 0
+      ? (fetchedCount === open.length
+          ? '\n_✅ Harga di-refresh dari DexScreener_'
+          : `\n_⚠️ ${fetchedCount}/${open.length} harga di-refresh, ${failedCount} dari cache_`)
+      : '';
+
     // Build keyboard: SELL button for each position + Refresh
     const buttons: any[] = [];
     for (const pos of open.slice(0, 8)) { // max 8 sell buttons (Telegram limit)
@@ -487,7 +504,7 @@ export class TelegramBot {
     const keyboard = Markup.inlineKeyboard(buttons);
 
     await ctx.reply(
-      `📂 *Open Positions*${mode}\n\n${summary}`,
+      `📂 *Open Positions*${mode}\n\n${summary}${priceIndicator}`,
       { parse_mode: 'Markdown', ...keyboard }
     );
   }
