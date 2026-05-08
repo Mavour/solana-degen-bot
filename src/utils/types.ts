@@ -86,6 +86,7 @@ export interface ApprovalRequest {
   simulationResult: SimulationResult;
   timestamp: number;
   status: 'PENDING' | 'APPROVED' | 'REJECTED' | 'EXPIRED';
+  messageId?: number; // Telegram message ID untuk edit saat expired
 }
 
 // ── Paper Trade (Dry Run) ────────────────────────────────────

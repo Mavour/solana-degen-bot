@@ -114,9 +114,7 @@ export class TelegramBot {
       const modeLabel = config.dryRun ? '🧪 DRY RUN' : '🟢 LIVE';
       const keyboard = Markup.keyboard([
         ['📊 Status', '📂 Positions'],
-        config.dryRun
-          ? ['📝 Dry Report', '❓ Help']
-          : ['❓ Help'],
+        ['📡 Signals', config.dryRun ? '📝 Dry Report' : '❓ Help'],
         ['⏭ Missed Signals', '✖️ Tutup Menu'],
       ]).resize().persistent();
 
@@ -133,6 +131,7 @@ export class TelegramBot {
     // Keyboard button taps
     this.bot.hears('📊 Status',        async (ctx) => this.handleStatus(ctx));
     this.bot.hears('📂 Positions',     async (ctx) => this.handlePositions(ctx));
+    this.bot.hears('📡 Signals',       async (ctx) => this.handleSignals(ctx));
     this.bot.hears('📝 Dry Report',    async (ctx) => this.handleDryReport(ctx));
     this.bot.hears('❓ Help',          async (ctx) => this.handleHelp(ctx));
     this.bot.hears('⏭ Missed Signals', async (ctx) => this.handleMissed(ctx));
@@ -151,6 +150,7 @@ export class TelegramBot {
     // Slash commands
     this.bot.command('status',    async (ctx) => this.handleStatus(ctx));
     this.bot.command('positions', async (ctx) => this.handlePositions(ctx));
+    this.bot.command('signals',   async (ctx) => this.handleSignals(ctx));
     this.bot.command('dryreport', async (ctx) => this.handleDryReport(ctx));
     this.bot.command('missed',    async (ctx) => this.handleMissed(ctx));
     this.bot.command('help',      async (ctx) => this.handleHelp(ctx));
@@ -509,6 +509,33 @@ export class TelegramBot {
     );
   }
 
+  private async handleSignals(ctx: Context): Promise<void> {
+    const pending = Array.from(this.pendingApprovals.values());
+    if (!pending.length) {
+      await ctx.reply('📭 Tidak ada signal yang menunggu respons.', { parse_mode: 'Markdown' });
+      return;
+    }
+
+    let text = `📡 *Pending Signals* (${pending.length})\n\n`;
+    for (const req of pending) {
+      const token = req.signal.token;
+      const ageMin = Math.floor((Date.now() - req.timestamp) / 60000);
+      const ttlMin = Math.floor(APPROVAL_TTL_MS / 60000);
+      const remainMin = ttlMin - ageMin;
+      const confEmoji = ({ HIGH: '🔥', MEDIUM: '⚡', LOW: '💡' } as Record<string,string>)[req.signal.confidence];
+
+      text += `${confEmoji} *${safeSymbol(token.symbol)}* | ${req.signal.confidence}\n`;
+      text += `📊 $${formatNumber(token.mcapUsd)} | EMA${req.signal.emaTouched} | RSI K:${req.signal.stochRsiK.toFixed(1)}\n`;
+      text += `⏰ ${remainMin}min remaining | ${req.tradeParams.amountSol} SOL\n`;
+      text += `🔗 [DexScreener](https://dexscreener.com/solana/${token.address}) | [GMGN](https://gmgn.ai/sol/token/${token.address})\n\n`;
+    }
+
+    await ctx.reply(text, {
+      parse_mode: 'Markdown',
+      link_preview_options: { is_disabled: true },
+    });
+  }
+
   private async handleDryReport(ctx: Context): Promise<void> {
     if (!config.dryRun) {
       await ctx.reply(
@@ -578,10 +605,11 @@ export class TelegramBot {
       `1. Bot scan otomatis tiap ${config.scanning.intervalSeconds / 60} menit\n` +
       `2. Alert dikirim ke sini saat ada signal\n` +
       `3. Kamu klik SIMULATE/APPROVE atau CANCEL\n` +
-      `4. Kalau tidak ada respons dalam ${reminderMin} menit, bot kirim reminder\n` +
-      `5. Alert expired setelah ${ttlMin} menit, tersimpan di Missed Signals\n` +
-      `6. Bot monitor RSI tiap 2 menit, alert lagi saat RSI peak lebih dari 80\n` +
-      `7. Klik SELL NOW di alert exit, atau ketik /sell SYMBOL untuk jual manual\n\n` +
+      `4. Ketik /signals untuk lihat semua pending signal dalam 1 list\n` +
+      `5. Kalau tidak ada respons dalam ${reminderMin} menit, bot kirim reminder\n` +
+      `6. Alert expired setelah ${ttlMin} menit — message asli di-edit jadi ⏰ EXPIRED\n` +
+      `7. Bot monitor RSI tiap 2 menit, alert lagi saat RSI peak lebih dari 80\n` +
+      `8. Klik SELL NOW di alert exit, atau ketik /sell SYMBOL untuk jual manual\n\n` +
       `*Entry signal (Obicle method):*\n` +
       `• Harga menyentuh EMA 25/50/100/200\n` +
       `• Stoch RSI di bawah 20 (bottoming)\n\n` +
@@ -706,16 +734,31 @@ export class TelegramBot {
       clearTimeout(reminderTimer);
       if (!this.pendingApprovals.has(approvalId)) return;
 
+      const req = this.pendingApprovals.get(approvalId);
       this.pendingApprovals.delete(approvalId);
       this.riskManager.clearPendingApproval(token.address);
       this.addMissed(signal, 'EXPIRED');
 
       logger.info(MODULE, `Signal expired (${ttlMin}min): ${token.symbol}`);
-      this.sendMessage(
-        `⏰ *Signal Expired* — ${token.symbol}\n` +
-        `_Tidak direspons dalam ${ttlMin} menit._\n` +
-        `Ketik /missed untuk lihat semua signal terlewat.`
-      ).catch(() => {});
+
+      // Edit message asli: hapus tombol + kasih label EXPIRED
+      if (req?.messageId) {
+        const expiredText =
+          (isDryRun ? `🧪 *DRY RUN* ` : '') +
+          `🎯 *${signal.confidence}* ${confEmoji} | *${safeSymbolStr}*\n` +
+          `📊 $${formatNumber(token.mcapUsd)} | 💧 $${formatNumber(token.liquidityUsd)} | 🕐 ${tokenAge}h${tokenAgeMin}m\n\n` +
+          `📈 EMA${signal.emaTouched} Touch ✅ | RSI K:${signal.stochRsiK.toFixed(1)} D:${signal.stochRsiD.toFixed(1)}\n\n` +
+          `⏰ *EXPIRED* — tidak direspons dalam ${ttlMin} menit.\n` +
+          `Ketik /missed untuk lihat signal terlewat.`;
+
+        this.bot.telegram.editMessageText(
+          config.telegram.chatId,
+          req.messageId,
+          undefined,
+          expiredText,
+          { parse_mode: 'Markdown', link_preview_options: { is_disabled: true } }
+        ).catch(() => {});
+      }
     }, APPROVAL_TTL_MS);
 
     // ── Build alert message ───────────────────────────────────
@@ -726,30 +769,17 @@ export class TelegramBot {
     const safeSymbolStr = safeSymbol(token.symbol);
     const safeNameStr = safeSymbol(token.name);
 
+    // Compact signal format — lebih pendek supaya gak terlalu panjang
     const message =
-      (isDryRun ? `🧪 *DRY RUN — SIGNAL ALERT*\n` : '') +
-      `🎯 *SIGNAL - ${signal.confidence} CONFIDENCE* ${confEmoji}\n` +
-      `━━━━━━━━━━━━━━━━━━━━━\n\n` +
-      `🪙 *${safeSymbolStr}* (${safeNameStr})\n` +
-      `📊 MCap: $${formatNumber(token.mcapUsd)}\n` +
-      `💧 Liquidity: $${formatNumber(token.liquidityUsd)}\n` +
-      `⚡ Fee: ${token.globalFeeSol.toFixed(1)} SOL\n` +
-      `🕐 Age: ${tokenAge}h ${tokenAgeMin}m\n` +
-      `👥 Holders: ${token.holders.toLocaleString()}\n\n` +
-      `📈 *Indicators*\n` +
-      `• EMA${signal.emaTouched} Touch: ✅\n` +
-      `• Stoch RSI K: ${signal.stochRsiK.toFixed(1)}\n` +
-      `• Stoch RSI D: ${signal.stochRsiD.toFixed(1)}\n` +
-      `• Status: ${signal.stochRsiBottoming ? '📉 BOTTOMING' : '➖ Normal'}\n\n` +
-      `💰 *Trade Details*\n` +
-      `• Amount: ${tradeParams.amountSol} SOL${isDryRun ? ' *(paper)*' : ''}\n` +
-      `• Slippage: ${tradeParams.slippagePct}%\n` +
-      `• Price Impact: ${quoteResult.priceImpactPct.toFixed(3)}%\n` +
-      `• Est. Fee: ${simulationResult.estimatedFeeSOL.toFixed(6)} SOL\n\n` +
+      (isDryRun ? `🧪 *DRY RUN* ` : '') +
+      `🎯 *${signal.confidence}* ${confEmoji} | *${safeSymbolStr}*\n` +
+      `📊 $${formatNumber(token.mcapUsd)} | 💧 $${formatNumber(token.liquidityUsd)} | 🕐 ${tokenAge}h${tokenAgeMin}m\n\n` +
+      `📈 EMA${signal.emaTouched} Touch ✅ | RSI K:${signal.stochRsiK.toFixed(1)} D:${signal.stochRsiD.toFixed(1)} | ${signal.stochRsiBottoming ? '📉 BOTTOMING' : '➖ Normal'}\n\n` +
+      `💰 ${tradeParams.amountSol} SOL${isDryRun ? ' paper' : ''} | Slippage ${tradeParams.slippagePct}% | Impact ${quoteResult.priceImpactPct.toFixed(2)}%\n` +
       `🔗 [DexScreener](https://dexscreener.com/solana/${token.address}) | [GMGN](https://gmgn.ai/sol/token/${token.address})\n\n` +
       (isDryRun
-        ? `_Klik SIMULATE untuk paper trade (no real tx)_`
-        : `⏰ Expires *${ttlMin} menit* | Reminder menit ke-${reminderMin}`);
+        ? `_⏰ ${ttlMin}min — Klik SIMULATE atau SKIP_`
+        : `⏰ ${ttlMin}min — Klik APPROVE atau CANCEL`);
 
     const approveLabel = isDryRun
       ? `🧪 SIMULATE (${tradeParams.amountSol} SOL paper)`
@@ -761,12 +791,14 @@ export class TelegramBot {
     ]);
 
     try {
-      await this.bot.telegram.sendMessage(config.telegram.chatId, message, {
+      const sent = await this.bot.telegram.sendMessage(config.telegram.chatId, message, {
         parse_mode: 'Markdown',
         ...keyboard,
         link_preview_options: { is_disabled: true },
       } as Parameters<typeof this.bot.telegram.sendMessage>[2]);
-      logger.info(MODULE, `Alert sent: ${token.symbol}`);
+      // Simpan messageId supaya bisa di-edit saat expired
+      request.messageId = sent.message_id;
+      logger.info(MODULE, `Alert sent: ${token.symbol} (msg:${sent.message_id})`);
     } catch (err) {
       logger.error(MODULE, 'Failed to send alert', err);
     }
@@ -914,6 +946,7 @@ export class TelegramBot {
         { command: 'start',      description: '🏠 Menu utama' },
         { command: 'status',     description: '📊 Status bot & scanner' },
         { command: 'positions',  description: '📂 Open positions' },
+        { command: 'signals',    description: '📡 Pending signals (1 list)' },
         { command: 'missed',     description: '⏭ Signal yang terlewat' },
         { command: 'scan',       description: '🔍 Trigger scan manual' },
         { command: 'sell',       description: '🔴 Jual position (manual)' },
