@@ -187,9 +187,17 @@ export class DryRunExecutor {
       report += `*🟢 Open (${open.length})*\n`;
       for (const t of open) {
         const age = Math.floor((Date.now() - t.entryTimestamp) / 60000);
+        const currentPrice = this.riskManager.getLastKnownPrice(t.tokenAddress);
+        let pnlStr = '_harga belum diupdate_';
+        if (currentPrice && t.entryPriceUsd > 0) {
+          const pnlPct = ((currentPrice - t.entryPriceUsd) / t.entryPriceUsd) * 100;
+          const pnlEmoji = pnlPct >= 0 ? '📈' : '📉';
+          pnlStr = `${pnlEmoji} ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%`;
+        }
+
         report += `• *${esc(t.symbol)}* | ${t.amountSol} SOL | ${age}m\n`;
-        report += `  Entry: $${t.entryPriceUsd.toFixed(8)} | Impact: ${t.priceImpactPct.toFixed(2)}%\n`;
-        report += `  Signal: EMA${t.emaTouched} RSI:${t.stochRsiK.toFixed(0)} \[${t.signalConfidence}\]\n`;
+        report += `  Entry: $${t.entryPriceUsd.toFixed(8)} | PnL: ${pnlStr}\n`;
+        report += `  Impact: ${t.priceImpactPct.toFixed(2)}% | Signal: EMA${t.emaTouched} RSI:${t.stochRsiK.toFixed(0)} \[${t.signalConfidence}\]\n`;
       }
       report += '\n';
     }
