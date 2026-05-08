@@ -117,12 +117,7 @@ export class BotOrchestrator {
 
       if (!tokens.length) {
         logger.info(MODULE, 'No tokens passed filters');
-        // Kirim info ke Telegram supaya user tau bot masih jalan
-        await this.telegramBot.sendMessage(
-          `🔄 *Scan selesai* — [${source.toUpperCase()}]\n` +
-          `📭 Tidak ada token yang lolos filter saat ini.\n` +
-          `_Filter: MCap >$${(config.trading.minMcapUsd/1000).toFixed(0)}K, Age >${config.trading.minTokenAgeSeconds/3600}h_`
-        );
+        // Cukup log — jangan spam Telegram kalau nggak ada apa-apa
         return;
       }
 
@@ -137,17 +132,8 @@ export class BotOrchestrator {
       logger.info(MODULE, `📡 ${signals.length} signal(s) dari ${tokens.length} tokens`);
 
       if (!signals.length) {
-        // Kirim summary ke Telegram — user tau scan jalan tapi belum ada setup yang pas
-        const tokenList = tokens.slice(0, 5).map(t =>
-          `• ${t.symbol} $${(t.mcapUsd/1000).toFixed(0)}K | OHLCV:${t.ohlcv.length}`
-        ).join('\n');
-
-        await this.telegramBot.sendMessage(
-          `🔄 *Scan selesai* — [${source.toUpperCase()}]\n` +
-          `📊 ${tokens.length} token lolos filter, belum ada signal EMA+RSI.\n\n` +
-          `*Token yang discan:*\n${tokenList}\n\n` +
-          `_Signal butuh: harga di EMA + Stoch RSI < 20_`
-        );
+        // Cukup log — jangan spam Telegram kalau nggak ada signal
+        logger.info(MODULE, 'No signals from scanned tokens');
         return;
       }
 
