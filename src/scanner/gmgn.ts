@@ -42,7 +42,13 @@ function getBrowserHeaders(): Record<string, string> {
     'Cache-Control': 'no-cache',
   };
 
-  // Inject session cookie kalau ada di .env
+  // GMGN API Key (kalau punya key official)
+  if (config.gmgn.apiKey) {
+    headers['Authorization'] = `Bearer ${config.gmgn.apiKey}`;
+    headers['X-API-Key'] = config.gmgn.apiKey;
+  }
+
+  // Session cookie fallback (kalau nggak punya API key)
   if (config.gmgn.sessionCookie) {
     headers['Cookie'] = config.gmgn.sessionCookie;
   }
@@ -96,12 +102,15 @@ export class GMGNScanner {
         const status = err.response?.status;
         const url = err.config?.url;
         if (status === 403) {
+          const hasApiKey = !!config.gmgn.apiKey;
           const hasCookie = !!config.gmgn.sessionCookie;
           const hasProxy = !!config.proxy.url;
-          if (!hasCookie && !hasProxy) {
-            logger.warn(MODULE, `GMGN 403 - IP blocked. Tambahkan GMGN_SESSION_COOKIE atau PROXY_URL di .env (lihat scripts/get-gmgn-session.js)`);
+          if (!hasApiKey && !hasCookie && !hasProxy) {
+            logger.warn(MODULE, `GMGN 403 - IP blocked. Tambahkan GMGN_API_KEY, GMGN_SESSION_COOKIE, atau PROXY_URL di .env`);
+          } else if (hasApiKey) {
+            logger.warn(MODULE, `GMGN 403 - API key invalid atau expired. Coba generate ulang GMGN_API_KEY.`);
           } else if (hasCookie) {
-            logger.warn(MODULE, `GMGN 403 - Session cookie mungkin expired. Coba update GMGN_SESSION_COOKIE.`);
+            logger.warn(MODULE, `GMGN 403 - Session cookie expired. Coba update GMGN_SESSION_COOKIE.`);
           } else {
             logger.warn(MODULE, `GMGN 403 - Proxy masih kena block. Coba ganti PROXY_URL.`);
           }
