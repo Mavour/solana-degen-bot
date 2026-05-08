@@ -42,10 +42,14 @@ function getBrowserHeaders(): Record<string, string> {
     'Cache-Control': 'no-cache',
   };
 
-  // GMGN API Key (kalau punya key official)
+  // GMGN API Key — coba semua format header yang umum
   if (config.gmgn.apiKey) {
     headers['Authorization'] = `Bearer ${config.gmgn.apiKey}`;
     headers['X-API-Key'] = config.gmgn.apiKey;
+    headers['x-api-key'] = config.gmgn.apiKey;
+    headers['API-Key'] = config.gmgn.apiKey;
+    headers['api-key'] = config.gmgn.apiKey;
+    headers['Api-Key'] = config.gmgn.apiKey;
   }
 
   // Session cookie fallback (kalau nggak punya API key)
@@ -93,6 +97,13 @@ export class GMGNScanner {
       if (config.gmgn.apiKey) {
         req.params = req.params || {};
         req.params.api_key = config.gmgn.apiKey;
+        req.params.apikey = config.gmgn.apiKey;
+        req.params.key = config.gmgn.apiKey;
+        req.params.token = config.gmgn.apiKey;
+        // Log URL untuk debug (sensor key)
+        const url = req.url ?? '';
+        const fullUrl = `${req.baseURL}${url}`;
+        logger.debug(MODULE, `GMGN request: ${fullUrl.split('?')[0]}?api_key=***`);
       }
       return req;
     });
