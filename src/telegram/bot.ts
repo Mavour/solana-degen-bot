@@ -2,6 +2,7 @@
 // Telegraf Telegram bot — Alert + Manual Approval + Missed Signals + Sell
 
 import { Telegraf, Markup, Context } from 'telegraf';
+import axios from 'axios';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 import { ApprovalRequest, SignalResult, QuoteResult, SimulationResult, TradeParams, Position } from '../utils/types';
@@ -34,6 +35,27 @@ function escapeMarkdown(text: string): string {
 // Escape ONLY inside link text, not URL itself
 function safeSymbol(symbol: string): string {
   return escapeMarkdown(symbol);
+}
+
+/**
+ * Fetch fresh price dari DexScreener untuk 1 token address.
+ * Lebih cepat & reliable daripada full monitor cycle.
+ */
+async function fetchFreshPriceUSD(tokenAddress: string): Promise<number | null> {
+  try {
+    const res = await axios.get(
+      `https://api.dexscreener.com/tokens/v1/solana/${tokenAddress}`,
+      { timeout: 8000, headers: { 'Accept': 'application/json' } }
+    );
+    const pairs = Array.isArray(res.data) ? res.data : (res.data?.pairs ?? []);
+    for (const p of pairs) {
+      const price = parseFloat(p.priceUsd ?? p.price_usd ?? '0');
+      if (price > 0) return price;
+    }
+  } catch (err) {
+    logger.debug(MODULE, `fetchFreshPrice failed for ${tokenAddress.slice(0, 8)}`);
+  }
+  return null;
 }
 
 // TTL bisa dikonfigurasi — default 10 menit
@@ -151,7 +173,7 @@ export class TelegramBot {
           `⚠️ *Cara pakai:*\n` +
           `\`/sell SYMBOL\`\n\n` +
           `Contoh: \`/sell BONK\`\n` +
-          `Bot akan cari open position dan kirim tombol SELL.`,
+          `Bot akan refresh harga dan kirim konfirmasi SELL.`,
           { parse_mode: 'Markdown' }
         );
         return;
@@ -164,20 +186,8 @@ export class TelegramBot {
         return;
       }
 
-      await ctx.reply(
-        `⚠️ *Konfirmasi Jual*\n\n` +
-        `🪙 *${pos.symbol}*\n` +
-        `📥 Entry: $${pos.entryPriceUsd.toFixed(8)}\n` +
-        `💰 Size: ${pos.amountSol} SOL\n\n` +
-        `Klik tombol di bawah untuk eksekusi:`,
-        {
-          parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([
-            [Markup.button.callback(`🔴 SELL NOW ${pos.symbol}`, `SELL_${pos.id}`)],
-            [Markup.button.callback('❌ Batal', 'DISMISS_EXIT')],
-          ]),
-        }
-      );
+      // Langsung trigger price refresh + confirm
+      await this.showSellConfirmation(ctx, pos);
     });
 
     // APPROVE / CANCEL inline button callbacks
@@ -188,9 +198,16 @@ export class TelegramBot {
       await this.handleApproval(ctx, ctx.match[1], 'REJECTED');
     });
 
-    // SELL / DISMISS callbacks
+    // SELL / CONFIRM SELL / CANCEL SELL callbacks
     this.bot.action(/^SELL_(.+)$/, async (ctx) => {
       await this.handleSellCallback(ctx, ctx.match[1]);
+    });
+    this.bot.action(/^CONFIRM_SELL_(.+)$/, async (ctx) => {
+      await this.handleConfirmSell(ctx, ctx.match[1]);
+    });
+    this.bot.action('CANCEL_SELL', async (ctx) => {
+      await ctx.answerCbQuery('❌ Dibatalkan');
+      await ctx.editMessageText('❌ *Penjualan dibatalkan.*').catch(() => {});
     });
     this.bot.action('DISMISS_EXIT', async (ctx) => {
       await ctx.answerCbQuery('Dismissed');
@@ -225,9 +242,71 @@ export class TelegramBot {
     });
   }
 
-  // ── Sell callback handler ────────────────────────────────────
+  // ── Sell flow: refresh price → confirm → execute ────────────
 
+  /**
+   * Step 1: Fetch fresh price, show confirmation dengan PnL terupdate
+   */
+  private async showSellConfirmation(ctx: Context, position: Position): Promise<void> {
+    const safeSym = safeSymbol(position.symbol);
+    const msg = await ctx.reply(
+      `🔄 *Refresh harga untuk ${safeSym}...*\n\n` +
+      `Mengambil harga terbaru dari market...`,
+      { parse_mode: 'Markdown' }
+    );
+
+    // Fetch fresh price
+    const freshPrice = await fetchFreshPriceUSD(position.tokenAddress);
+    const currentPrice = freshPrice ?? this.riskManager.getLastKnownPrice(position.tokenAddress) ?? position.entryPriceUsd;
+
+    const pnlPct = position.entryPriceUsd > 0
+      ? ((currentPrice - position.entryPriceUsd) / position.entryPriceUsd) * 100
+      : 0;
+    const pnlEmoji = pnlPct >= 0 ? '📈' : '📉';
+    const pnlStr = `${pnlEmoji} ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%`;
+
+    const ageMin = Math.floor((Date.now() - position.entryTimestamp) / 60000);
+
+    const text =
+      `⚠️ *KONFIRMASI JUAL — Harga Terupdate*\n\n` +
+      `🪙 *${safeSym}*\n` +
+      `📥 Entry: $${position.entryPriceUsd.toFixed(8)}\n` +
+      `💵 *Sekarang: $${currentPrice.toFixed(8)}*\n` +
+      `💰 PnL: ${pnlStr}\n` +
+      `⏱ Hold: ${ageMin}m\n` +
+      `💼 Size: ${position.amountSol} SOL\n\n` +
+      (freshPrice ? `_✅ Harga fresh dari market_\n` : `_⚠️ Harga dari cache terakhir_\n`) +
+      `_Klik CONFIRM SELL untuk eksekusi:`;
+
+    const keyboard = Markup.inlineKeyboard([
+      [Markup.button.callback(`🔴 CONFIRM SELL ${safeSym}`, `CONFIRM_SELL_${position.id}`)],
+      [Markup.button.callback('❌ Batal', 'CANCEL_SELL')],
+    ]);
+
+    // Hapus pesan "refreshing" dan kirim konfirmasi
+    await ctx.telegram.deleteMessage(ctx.chat!.id, msg.message_id).catch(() => {});
+    await ctx.reply(text, { parse_mode: 'Markdown', ...keyboard });
+  }
+
+  /**
+   * Step 2: User klik SELL NOW (dari exit alert atau /positions)
+   * → Trigger showSellConfirmation
+   */
   private async handleSellCallback(ctx: Context, positionId: string): Promise<void> {
+    const position = this.riskManager.getOpenPositions().find(p => p.id === positionId);
+    if (!position) {
+      await ctx.answerCbQuery('❌ Position sudah ditutup atau tidak ditemukan');
+      return;
+    }
+
+    await ctx.answerCbQuery('🔄 Refreshing price...');
+    await this.showSellConfirmation(ctx, position);
+  }
+
+  /**
+   * Step 3: User klik CONFIRM SELL → Eksekusi jual
+   */
+  private async handleConfirmSell(ctx: Context, positionId: string): Promise<void> {
     const position = this.riskManager.getOpenPositions().find(p => p.id === positionId);
     if (!position) {
       await ctx.answerCbQuery('❌ Position sudah ditutup atau tidak ditemukan');
@@ -236,7 +315,7 @@ export class TelegramBot {
 
     await ctx.answerCbQuery('⏳ Selling...');
     await ctx.editMessageText(
-      `⏳ *SELLING ${position.symbol}...*\n\n` +
+      `⏳ *SELLING ${safeSymbol(position.symbol)}...*\n\n` +
       `Mengirim Jito sell bundle...`,
       { parse_mode: 'Markdown' }
     );
@@ -250,7 +329,7 @@ export class TelegramBot {
       await this.tradeExecutor.executeSell(position);
     } catch (err) {
       logger.error(MODULE, `Sell callback error for ${position.symbol}`, err);
-      await this.sendMessage(`❌ *SELL ERROR*\n${position.symbol}\n${String(err)}`);
+      await this.sendMessage(`❌ *SELL ERROR*\n${safeSymbol(position.symbol)}\n${escapeMarkdown(String(err))}`);
     }
   }
 
