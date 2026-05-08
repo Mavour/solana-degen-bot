@@ -101,6 +101,7 @@ export class DryRunExecutor {
       entryPriceUsd,
       amountSol: tradeParams.amountSol,
       tokensReceived: tokensSimulated,
+      tokensReceivedRaw: String(Math.floor(tokensSimulated)),
       entryTimestamp: Date.now(),
       txSignature: `[DRY_RUN_${paperTradeId}]`,
       status: 'OPEN',

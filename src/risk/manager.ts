@@ -96,7 +96,7 @@ export class RiskManager extends EventEmitter {
 
   closePosition(positionId: string, exitPriceUsd: number): Position | null {
     const position = this.positions.get(positionId);
-    if (!position) return null;
+    if (!position || position.status !== 'OPEN') return null;
 
     position.status = 'CLOSED';
     position.exitPriceUsd = exitPriceUsd;
@@ -275,6 +275,9 @@ export class RiskManager extends EventEmitter {
       const ageStr = age < 60 ? `${age}m` : `${Math.floor(age/60)}h ${age%60}m`;
       const rsiPeak = this.rsiPeakAlerted.has(p.id) ? ' ⚡' : '';
 
+      // Escape symbol untuk Telegram Markdown
+      const safeSym = p.symbol.replace(/_/g, '\\_').replace(/\[/g, '\\[').replace(/\]/g, '\\]');
+
       // Hitung PnL kalau ada harga terkini
       const currentPrice = this.lastKnownPrices.get(p.tokenAddress);
       let pnlStr = '_harga belum diupdate_';
@@ -285,7 +288,7 @@ export class RiskManager extends EventEmitter {
       }
 
       return (
-        `• *${p.symbol}*${rsiPeak} | ${p.amountSol} SOL | ${ageStr}\n` +
+        `• *${safeSym}*${rsiPeak} | ${p.amountSol} SOL | ${ageStr}\n` +
         `  Entry: $${p.entryPriceUsd.toFixed(8)} | PnL: ${pnlStr}`
       );
     }).join('\n');

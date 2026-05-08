@@ -96,10 +96,9 @@ export class GMGNScanner {
     this.client.interceptors.request.use((req) => {
       if (config.gmgn.apiKey) {
         req.params = req.params || {};
+        // Cuma tambah api_key (format paling umum GMGN)
+        // Kalau masih 403, user perlu cek exact header/param dari browser Network tab
         req.params.api_key = config.gmgn.apiKey;
-        req.params.apikey = config.gmgn.apiKey;
-        req.params.key = config.gmgn.apiKey;
-        req.params.token = config.gmgn.apiKey;
         // Log URL untuk debug (sensor key)
         const url = req.url ?? '';
         const fullUrl = `${req.baseURL}${url}`;

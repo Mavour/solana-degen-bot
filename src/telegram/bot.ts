@@ -182,7 +182,7 @@ export class TelegramBot {
       const open = this.riskManager.getOpenPositions();
       const pos = open.find(p => p.symbol.toUpperCase() === symbol);
       if (!pos) {
-        await ctx.reply(`❌ Tidak ada open position untuk *${symbol}*.\nCek /positions.`, { parse_mode: 'Markdown' });
+        await ctx.reply(`❌ Tidak ada open position untuk *${safeSymbol(symbol)}*.\nCek /positions.`, { parse_mode: 'Markdown' });
         return;
       }
 
@@ -280,8 +280,8 @@ export class TelegramBot {
       `💰 PnL: ${pnlStr}\n` +
       `⏱ Hold: ${ageMin}m\n` +
       `💼 Size: ${position.amountSol} SOL\n\n` +
-      (freshPrice ? `_✅ Harga fresh dari market_\n` : `_⚠️ Harga dari cache terakhir_\n`) +
-      `_Klik CONFIRM SELL untuk eksekusi:`;
+      (freshPrice ? `✅ Harga fresh dari market\n` : `⚠️ Harga dari cache terakhir\n`) +
+      `Klik CONFIRM SELL untuk eksekusi:`;
 
     const keyboard = Markup.inlineKeyboard([
       [Markup.button.callback(`🔴 CONFIRM SELL ${safeSym}`, `CONFIRM_SELL_${position.id}`)],
@@ -290,7 +290,16 @@ export class TelegramBot {
 
     // Hapus pesan "refreshing" dan kirim konfirmasi
     await ctx.telegram.deleteMessage(ctx.chat!.id, msg.message_id).catch(() => {});
-    await ctx.reply(text, { parse_mode: 'Markdown', ...keyboard });
+    try {
+      await ctx.reply(text, { parse_mode: 'Markdown', ...keyboard });
+    } catch (e: any) {
+      // Fallback: kalau Markdown parse error, kirim plain text biar tombol tetap muncul
+      if (e?.response?.error_code === 400) {
+        await ctx.reply(text, keyboard);
+      } else {
+        throw e;
+      }
+    }
   }
 
   /**
@@ -333,8 +342,9 @@ export class TelegramBot {
     try {
       await this.tradeExecutor.executeSell(position);
     } catch (err) {
-      logger.error(MODULE, `Sell callback error for ${position.symbol}`, err);
-      await this.sendMessage(`❌ *SELL ERROR*\n${safeSymbol(position.symbol)}\n${escapeMarkdown(String(err))}`);
+      // executeSell sudah handle error internal dan kirim sendSellResult.
+      // Kalau sampai di sini = unexpected error, cukup log.
+      logger.error(MODULE, `Unexpected sell callback error for ${position.symbol}`, err);
     }
   }
 
@@ -818,8 +828,20 @@ export class TelegramBot {
         parse_mode: 'Markdown',
         link_preview_options: { is_disabled: true },
       });
-    } catch (err) {
-      logger.error(MODULE, 'sendMessage failed', err);
+    } catch (err: any) {
+      // Fallback ke plain text kalau Markdown parse error
+      if (err?.response?.error_code === 400) {
+        logger.warn(MODULE, 'Markdown parse error, falling back to plain text');
+        try {
+          await this.bot.telegram.sendMessage(config.telegram.chatId, text, {
+            link_preview_options: { is_disabled: true },
+          });
+        } catch (err2) {
+          logger.error(MODULE, 'sendMessage plain fallback failed', err2);
+        }
+      } else {
+        logger.error(MODULE, 'sendMessage failed', err);
+      }
     }
   }
 
@@ -829,9 +851,22 @@ export class TelegramBot {
         parse_mode: 'Markdown',
         link_preview_options: { is_disabled: true },
         ...keyboard,
-      } as Parameters<typeof this.bot.telegram.sendMessage>[2]);
-    } catch (err) {
-      logger.error(MODULE, 'sendMessageWithKeyboard failed', err);
+      } as any);
+    } catch (err: any) {
+      // Fallback ke plain text kalau Markdown parse error — tombol tetap muncul
+      if (err?.response?.error_code === 400) {
+        logger.warn(MODULE, 'Markdown parse error in keyboard msg, falling back to plain text');
+        try {
+          await this.bot.telegram.sendMessage(config.telegram.chatId, text, {
+            link_preview_options: { is_disabled: true },
+            ...keyboard,
+          } as any);
+        } catch (err2) {
+          logger.error(MODULE, 'sendMessageWithKeyboard plain fallback failed', err2);
+        }
+      } else {
+        logger.error(MODULE, 'sendMessageWithKeyboard failed', err);
+      }
     }
   }
 
