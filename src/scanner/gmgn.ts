@@ -95,7 +95,19 @@ export class GMGNScanner {
       (err) => {
         const status = err.response?.status;
         const url = err.config?.url;
-        logger.warn(MODULE, `Request failed: ${url} (HTTP ${status})`);
+        if (status === 403) {
+          const hasCookie = !!config.gmgn.sessionCookie;
+          const hasProxy = !!config.proxy.url;
+          if (!hasCookie && !hasProxy) {
+            logger.warn(MODULE, `GMGN 403 - IP blocked. Tambahkan GMGN_SESSION_COOKIE atau PROXY_URL di .env (lihat scripts/get-gmgn-session.js)`);
+          } else if (hasCookie) {
+            logger.warn(MODULE, `GMGN 403 - Session cookie mungkin expired. Coba update GMGN_SESSION_COOKIE.`);
+          } else {
+            logger.warn(MODULE, `GMGN 403 - Proxy masih kena block. Coba ganti PROXY_URL.`);
+          }
+        } else {
+          logger.warn(MODULE, `Request failed: ${url} (HTTP ${status})`);
+        }
         return Promise.reject(err);
       }
     );
