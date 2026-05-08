@@ -111,40 +111,31 @@ export class TelegramBot {
 
   private setupHandlers(): void {
 
-    // /start — show persistent keyboard menu
+    // /start — welcome message only (no keyboard menu)
     this.bot.command('start', async (ctx) => {
       const modeLabel = config.dryRun ? '🧪 DRY RUN' : '🟢 LIVE';
-      const keyboard = Markup.keyboard([
-        ['📊 Status', '📂 Positions'],
-        ['📡 Signals', '⚙️ Settings'],
-        [config.dryRun ? '📝 Dry Report' : '❓ Help', '⏭ Missed Signals'],
-        ['✖️ Tutup Menu'],
-      ]).resize().persistent();
+      const scanMin = config.scanning.intervalSeconds / 60;
 
       await ctx.reply(
         `🤖 *VANGUARD-01 — Solana Degen Bot*\n\n` +
-        `Mode saat ini: *${modeLabel}*\n\n` +
-        `Bot scan otomatis tiap *${config.scanning.intervalSeconds / 60} menit*.\n` +
-        `Alert dikirim ke sini saat ada signal masuk.\n\n` +
-        `Pilih menu di bawah atau ketik command:`,
-        { parse_mode: 'Markdown', ...keyboard }
+        `Mode: *${modeLabel}*\n` +
+        `Scan: tiap *${scanMin} menit* | Monitor: tiap *${config.monitor.intervalSeconds / 60} menit*\n\n` +
+        `*Command:*\n` +
+        `/status — 📊 Status bot & scanner\n` +
+        `/positions — 📂 Open positions (+ live price)\n` +
+        `/signals — 📡 Pending signals (1 list)\n` +
+        `/settings — ⚙️ Ubah parameter trading\n` +
+        `/scan — 🔍 Trigger scan manual\n` +
+        `/sell SYMBOL — 🔴 Jual position\n` +
+        `/missed — ⏭ Signal terlewat\n` +
+        `/dryreport — 📝 Laporan paper trading\n` +
+        `/help — ❓ Panduan lengkap\n\n` +
+        `_Bot akan kirim alert signal ke chat ini._`,
+        { parse_mode: 'Markdown' }
       );
     });
 
-    // Keyboard button taps
-    this.bot.hears('📊 Status',        async (ctx) => this.handleStatus(ctx));
-    this.bot.hears('📂 Positions',     async (ctx) => this.handlePositions(ctx));
-    this.bot.hears('📡 Signals',       async (ctx) => this.handleSignals(ctx));
-    this.bot.hears('⚙️ Settings',      async (ctx) => this.handleSettings(ctx));
-    this.bot.hears('📝 Dry Report',    async (ctx) => this.handleDryReport(ctx));
-    this.bot.hears('❓ Help',          async (ctx) => this.handleHelp(ctx));
-    this.bot.hears('⏭ Missed Signals', async (ctx) => this.handleMissed(ctx));
-    this.bot.hears('✖️ Tutup Menu',    async (ctx) => {
-      await ctx.reply(
-        'Menu disembunyikan. Ketik /start untuk tampilkan lagi.',
-        Markup.removeKeyboard()
-      );
-    });
+    // (Keyboard menu dihapus — pakai command slash saja agar lebih simpel)
 
     // /ping
     this.bot.command('ping', async (ctx) => {
