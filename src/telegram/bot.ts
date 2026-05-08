@@ -3,8 +3,9 @@
 
 import { Telegraf, Markup, Context } from 'telegraf';
 import axios from 'axios';
-import { config } from '../config';
+import { config, applyRuntimeSettings } from '../config';
 import { logger } from '../utils/logger';
+import { SettingsStore } from '../utils/settings';
 import { ApprovalRequest, SignalResult, QuoteResult, SimulationResult, TradeParams, Position } from '../utils/types';
 import type { ExitSignal } from '../risk/manager';
 import { RiskManager } from '../risk/manager';
@@ -90,6 +91,7 @@ export class TelegramBot {
   dryRunExecutor: DryRunExecutor | null = null;
   private tradeExecutor: TradeExecutor | null = null;
   private onManualScanCallback: (() => Promise<void>) | null = null;
+  private editingSettings: Map<number, string> = new Map(); // chatId -> paramKey
 
   onManualScan(cb: () => Promise<void>): void {
     this.onManualScanCallback = cb;
@@ -114,8 +116,9 @@ export class TelegramBot {
       const modeLabel = config.dryRun ? '🧪 DRY RUN' : '🟢 LIVE';
       const keyboard = Markup.keyboard([
         ['📊 Status', '📂 Positions'],
-        ['📡 Signals', config.dryRun ? '📝 Dry Report' : '❓ Help'],
-        ['⏭ Missed Signals', '✖️ Tutup Menu'],
+        ['📡 Signals', '⚙️ Settings'],
+        [config.dryRun ? '📝 Dry Report' : '❓ Help', '⏭ Missed Signals'],
+        ['✖️ Tutup Menu'],
       ]).resize().persistent();
 
       await ctx.reply(
@@ -132,6 +135,7 @@ export class TelegramBot {
     this.bot.hears('📊 Status',        async (ctx) => this.handleStatus(ctx));
     this.bot.hears('📂 Positions',     async (ctx) => this.handlePositions(ctx));
     this.bot.hears('📡 Signals',       async (ctx) => this.handleSignals(ctx));
+    this.bot.hears('⚙️ Settings',      async (ctx) => this.handleSettings(ctx));
     this.bot.hears('📝 Dry Report',    async (ctx) => this.handleDryReport(ctx));
     this.bot.hears('❓ Help',          async (ctx) => this.handleHelp(ctx));
     this.bot.hears('⏭ Missed Signals', async (ctx) => this.handleMissed(ctx));
@@ -151,6 +155,7 @@ export class TelegramBot {
     this.bot.command('status',    async (ctx) => this.handleStatus(ctx));
     this.bot.command('positions', async (ctx) => this.handlePositions(ctx));
     this.bot.command('signals',   async (ctx) => this.handleSignals(ctx));
+    this.bot.command('settings',  async (ctx) => this.handleSettings(ctx));
     this.bot.command('dryreport', async (ctx) => this.handleDryReport(ctx));
     this.bot.command('missed',    async (ctx) => this.handleMissed(ctx));
     this.bot.command('help',      async (ctx) => this.handleHelp(ctx));
@@ -225,6 +230,22 @@ export class TelegramBot {
     // Refresh exit alert price
     this.bot.action(/^REFRESH_EXIT_(.+)$/, async (ctx) => {
       await this.handleRefreshExit(ctx, ctx.match[1]);
+    });
+
+    // Settings callbacks
+    this.bot.action(/^SET_(.+)$/, async (ctx) => {
+      await this.handleSettingSelect(ctx, ctx.match[1]);
+    });
+    this.bot.action('TOGGLE_dryRun', async (ctx) => {
+      await this.handleToggleDryRun(ctx);
+    });
+
+    // Catch-all text untuk settings input
+    this.bot.on('text', async (ctx) => {
+      const chatId = ctx.chat?.id;
+      if (chatId && this.editingSettings.has(chatId)) {
+        await this.handleSettingValue(ctx);
+      }
     });
 
     // Inline refresh callbacks
@@ -625,6 +646,120 @@ export class TelegramBot {
     );
   }
 
+  // ── Settings flow ───────────────────────────────────────────
+
+  private async handleSettings(ctx: Context): Promise<void> {
+    const mode = config.dryRun ? '🧪 DRY RUN' : '🟢 LIVE';
+    const scanMin = config.scanning.intervalSeconds / 60;
+    const monMin = config.monitor.intervalSeconds / 60;
+
+    const text =
+      `⚙️ *Settings — ${mode}*\n\n` +
+      `💰 *Trade*\n` +
+      `• Trade Size: *${config.trading.maxTradeSol} SOL*\n` +
+      `• Slippage: *${config.trading.slippageMinPct} – ${config.trading.slippageMaxPct}%*\n` +
+      `• Max Impact: *${config.trading.maxPriceImpactPct}%*\n\n` +
+      `🛡 *Risk*\n` +
+      `• Stop Loss: *-${config.risk.stopLossPct}%*\n` +
+      `• Take Profit: *+${config.risk.takeProfitPct}%*\n\n` +
+      `⏱ *Intervals*\n` +
+      `• Scan: *${scanMin} menit*\n` +
+      `• Monitor: *${monMin} menit*\n\n` +
+      `_Klik parameter di bawah untuk ubah:_`;
+
+    const keyboard = Markup.inlineKeyboard([
+      [Markup.button.callback(`💰 Trade Size (${config.trading.maxTradeSol} SOL)`, 'SET_maxTradeSol')],
+      [Markup.button.callback(`🛡 Stop Loss (${config.risk.stopLossPct}%)`, 'SET_stopLossPct')],
+      [Markup.button.callback(`🎯 Take Profit (${config.risk.takeProfitPct}%)`, 'SET_takeProfitPct')],
+      [Markup.button.callback(`⚡ Slippage Min (${config.trading.slippageMinPct}%)`, 'SET_slippageMinPct')],
+      [Markup.button.callback(`⚡ Slippage Max (${config.trading.slippageMaxPct}%)`, 'SET_slippageMaxPct')],
+      [Markup.button.callback(`📊 Max Impact (${config.trading.maxPriceImpactPct}%)`, 'SET_maxPriceImpactPct')],
+      [Markup.button.callback(`🔍 Scan Interval (${scanMin}m)`, 'SET_scanIntervalSeconds')],
+      [Markup.button.callback(`👁 Monitor Interval (${monMin}m)`, 'SET_monitorIntervalSeconds')],
+      [Markup.button.callback(`🧪 Toggle DRY_RUN (${config.dryRun ? 'ON' : 'OFF'})`, 'TOGGLE_dryRun')],
+    ]);
+
+    await ctx.reply(text, { parse_mode: 'Markdown', ...keyboard });
+  }
+
+  private async handleSettingSelect(ctx: Context, paramKey: string): Promise<void> {
+    const chatId = ctx.chat?.id;
+    if (!chatId) return;
+
+    this.editingSettings.set(chatId, paramKey);
+
+    const labels: Record<string, string> = {
+      maxTradeSol: 'Trade Size (SOL)',
+      stopLossPct: 'Stop Loss (%)',
+      takeProfitPct: 'Take Profit (%)',
+      slippageMinPct: 'Slippage Min (%)',
+      slippageMaxPct: 'Slippage Max (%)',
+      maxPriceImpactPct: 'Max Price Impact (%)',
+      scanIntervalSeconds: 'Scan Interval (detik)',
+      monitorIntervalSeconds: 'Monitor Interval (detik)',
+    };
+
+    await ctx.answerCbQuery();
+    await ctx.reply(
+      `✏️ *Ubah ${labels[paramKey] ?? paramKey}*\n\n` +
+      `Kirim nilai baru sebagai angka.\n` +
+      `Contoh: \`0.2\`, \`15\`, \`180\`\n\n` +
+      `_Ketik /settings untuk batal._`,
+      { parse_mode: 'Markdown' }
+    );
+  }
+
+  private async handleSettingValue(ctx: Context): Promise<void> {
+    const chatId = ctx.chat?.id;
+    if (!chatId) return;
+
+    const paramKey = this.editingSettings.get(chatId);
+    if (!paramKey) return; // bukan mode edit
+
+    const text = (ctx.message as any)?.text ?? '';
+    const num = parseFloat(text);
+
+    if (isNaN(num) || num < 0) {
+      await ctx.reply('❌ Nilai tidak valid. Kirim angka positif.', { parse_mode: 'Markdown' });
+      return;
+    }
+
+    // Build partial setting
+    const partial: Record<string, number> = { [paramKey]: num };
+
+    // Kalau scan/monitor interval, convert dari menit ke detik kalau user kirim < 60
+    // (asumsi: kalau < 60, user mungkin maksud menit)
+    if ((paramKey === 'scanIntervalSeconds' || paramKey === 'monitorIntervalSeconds') && num < 60) {
+      partial[paramKey] = num * 60;
+      await ctx.reply(`ℹ️ Dianggap *${num} menit* = ${partial[paramKey]} detik.`);
+    }
+
+    const needsRestart = applyRuntimeSettings(partial);
+    this.editingSettings.delete(chatId);
+
+    let msg = `✅ *${paramKey}* diupdate ke *${partial[paramKey]}*`;
+    if (needsRestart.length) {
+      msg += `\n\n⚠️ *Restart diperlukan* untuk:\n`;
+      msg += needsRestart.map(s => `• ${s}`).join('\n');
+      msg += `\n\n_Ketik \`pm2 restart solana-degen-bot\` di VPS, atau tunggu restart otomatis._`;
+    }
+
+    await ctx.reply(msg, { parse_mode: 'Markdown' });
+  }
+
+  private async handleToggleDryRun(ctx: Context): Promise<void> {
+    const newValue = !config.dryRun;
+    const needsRestart = applyRuntimeSettings({ dryRun: newValue });
+
+    await ctx.answerCbQuery(`DRY_RUN = ${newValue ? 'ON' : 'OFF'}`);
+    await ctx.editMessageText(
+      `🧪 *DRY_RUN diubah ke ${newValue ? 'ON ✅' : 'OFF 🔴'}*\n\n` +
+      `⚠️ *Restart diperlukan* agar perubahan berlaku.\n` +
+      `_Ketik \`pm2 restart solana-degen-bot\` di VPS._`,
+      { parse_mode: 'Markdown' }
+    );
+  }
+
   // ── Approval flow ─────────────────────────────────────────────
 
   private async handleApproval(
@@ -1014,6 +1149,7 @@ export class TelegramBot {
         { command: 'status',     description: '📊 Status bot & scanner' },
         { command: 'positions',  description: '📂 Open positions' },
         { command: 'signals',    description: '📡 Pending signals (1 list)' },
+        { command: 'settings',   description: '⚙️ Ubah parameter trading' },
         { command: 'missed',     description: '⏭ Signal yang terlewat' },
         { command: 'scan',       description: '🔍 Trigger scan manual' },
         { command: 'sell',       description: '🔴 Jual position (manual)' },
