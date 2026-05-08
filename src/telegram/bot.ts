@@ -741,24 +741,35 @@ export class TelegramBot {
 
       logger.info(MODULE, `Signal expired (${ttlMin}min): ${token.symbol}`);
 
-      // Edit message asli: hapus tombol + kasih label EXPIRED
+      // Hapus message signal yang expired (lebih rapih) — kalau gagal, edit jadi EXPIRED
       if (req?.messageId) {
-        const expiredText =
-          (isDryRun ? `🧪 *DRY RUN* ` : '') +
-          `🎯 *${signal.confidence}* ${confEmoji} | *${safeSymbolStr}*\n` +
-          `📊 $${formatNumber(token.mcapUsd)} | 💧 $${formatNumber(token.liquidityUsd)} | 🕐 ${tokenAge}h${tokenAgeMin}m\n\n` +
-          `📈 EMA${signal.emaTouched} Touch ✅ | RSI K:${signal.stochRsiK.toFixed(1)} D:${signal.stochRsiD.toFixed(1)}\n\n` +
-          `⏰ *EXPIRED* — tidak direspons dalam ${ttlMin} menit.\n` +
-          `Ketik /missed untuk lihat signal terlewat.`;
+        this.bot.telegram.deleteMessage(config.telegram.chatId, req.messageId)
+          .then(() => logger.debug(MODULE, `Deleted expired signal message: ${token.symbol}`))
+          .catch(() => {
+            // Kalau gagal hapus, edit jadi EXPIRED
+            const expiredText =
+              (isDryRun ? `🧪 *DRY RUN* ` : '') +
+              `🎯 *${signal.confidence}* ${confEmoji} | *${safeSymbolStr}*\n` +
+              `📊 $${formatNumber(token.mcapUsd)} | 💧 $${formatNumber(token.liquidityUsd)} | 🕐 ${tokenAge}h${tokenAgeMin}m\n\n` +
+              `📈 EMA${signal.emaTouched} Touch ✅ | RSI K:${signal.stochRsiK.toFixed(1)} D:${signal.stochRsiD.toFixed(1)}\n\n` +
+              `⏰ *EXPIRED* — tidak direspons dalam ${ttlMin} menit.`;
 
-        this.bot.telegram.editMessageText(
-          config.telegram.chatId,
-          req.messageId,
-          undefined,
-          expiredText,
-          { parse_mode: 'Markdown', link_preview_options: { is_disabled: true } }
-        ).catch(() => {});
+            this.bot.telegram.editMessageText(
+              config.telegram.chatId,
+              req.messageId,
+              undefined,
+              expiredText,
+              { parse_mode: 'Markdown', link_preview_options: { is_disabled: true } }
+            ).catch(() => {});
+          });
       }
+
+      // Kirim ringkasan singkat ke chat
+      this.sendMessage(
+        `⏰ *Signal Expired* — ${safeSymbolStr} ${confEmoji}\n` +
+        `_Tidak direspons dalam ${ttlMin} menit._\n` +
+        `Ketik /missed untuk lihat semua signal terlewat.`
+      ).catch(() => {});
     }, APPROVAL_TTL_MS);
 
     // ── Build alert message ───────────────────────────────────
