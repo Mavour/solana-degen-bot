@@ -37,6 +37,8 @@ export class BotOrchestrator {
   private monitorTask: cron.ScheduledTask | null = null;
   private isScanInProgress: boolean = false;
   private isMonitorInProgress: boolean = false;
+  private consecutiveScanFailures: number = 0;
+  private scannerDownAlerted: boolean = false;
 
   constructor() {
     this.rpcManager  = new RPCConnectionManager();
@@ -115,15 +117,20 @@ export class BotOrchestrator {
 
       const { tokens, source } = await this.scanner.scan();
 
+      // Reset failure counter on success
+      if (this.consecutiveScanFailures > 0) {
+        logger.info(MODULE, 'Scanner recovered');
+        this.consecutiveScanFailures = 0;
+        this.scannerDownAlerted = false;
+      }
+
       if (!tokens.length) {
         logger.info(MODULE, 'No tokens passed filters');
-        // Cukup log — jangan spam Telegram kalau nggak ada apa-apa
         return;
       }
 
       logger.info(MODULE, `📊 [${source.toUpperCase()}] ${tokens.length} tokens`);
 
-      // Log tiap token yang lolos untuk debug
       tokens.forEach(t => {
         logger.info(MODULE, `  ✓ ${t.symbol} | MCap:$${(t.mcapUsd/1000).toFixed(0)}K | Age:${Math.floor(t.ageSeconds/3600)}h | OHLCV:${t.ohlcv.length}`);
       });
@@ -132,7 +139,6 @@ export class BotOrchestrator {
       logger.info(MODULE, `📡 ${signals.length} signal(s) dari ${tokens.length} tokens`);
 
       if (!signals.length) {
-        // Cukup log — jangan spam Telegram kalau nggak ada signal
         logger.info(MODULE, 'No signals from scanned tokens');
         return;
       }
@@ -143,8 +149,19 @@ export class BotOrchestrator {
         await sleep(500);
       }
     } catch (err) {
-      logger.error(MODULE, 'Scan error', err);
-      await this.telegramBot.sendMessage(`❌ *Scan error*\n\`${String(err).slice(0, 200)}\``);
+      this.consecutiveScanFailures++;
+      logger.error(MODULE, `Scan error (${this.consecutiveScanFailures}/3)`, err);
+
+      // Alert ke Telegram kalau fail 3x berturut
+      if (this.consecutiveScanFailures >= 3 && !this.scannerDownAlerted) {
+        this.scannerDownAlerted = true;
+        this.telegramBot.sendMessage(
+          `⚠️ *Scanner Down*\n\n` +
+          `Bot gagal scan selama 3 kali berturut.\n` +
+          `Cek /status untuk detail scanner.\n\n` +
+          `_Coba /scan manual untuk test._`
+        ).catch(() => {});
+      }
     } finally {
       this.isScanInProgress = false;
     }

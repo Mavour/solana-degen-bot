@@ -123,6 +123,7 @@ export class TelegramBot {
         `*Command:*\n` +
         `/status — 📊 Status bot & scanner\n` +
         `/positions — 📂 Open positions (+ harga live)\n` +
+        `/pnl — 📊 Total PnL summary\n` +
         `/settings — ⚙️ Ubah parameter trading\n` +
         `/scan — 🔍 Trigger scan manual\n` +
         `/missed — ⏭ Signal terlewat\n` +
@@ -145,6 +146,7 @@ export class TelegramBot {
     // Slash commands
     this.bot.command('status',    async (ctx) => this.handleStatus(ctx));
     this.bot.command('positions', async (ctx) => this.handlePositions(ctx));
+    this.bot.command('pnl',       async (ctx) => this.handlePnL(ctx));
     this.bot.command('settings',  async (ctx) => this.handleSettings(ctx));
     this.bot.command('dryreport', async (ctx) => this.handleDryReport(ctx));
     this.bot.command('missed',    async (ctx) => this.handleMissed(ctx));
@@ -447,22 +449,30 @@ export class TelegramBot {
     const mode = config.dryRun ? ' *(DRY RUN)*' : '';
     const open = this.riskManager.getOpenPositions();
 
-    // Fetch fresh prices untuk semua open positions — jangan cuma baca cache
+    // Fetch fresh prices — parallel untuk semua open positions
     let tempMsg: any;
     const freshPrices = new Map<string, number>();
     let fetchedCount = 0;
     let failedCount = 0;
     if (open.length > 0) {
       tempMsg = await ctx.reply('🔄 *Refresh harga...*', { parse_mode: 'Markdown' });
-      for (const pos of open) {
+
+      // Parallel fetch — jauh lebih cepat dari sequential
+      const pricePromises = open.map(async (pos) => {
         const price = await fetchFreshPriceUSD(pos.tokenAddress);
+        return { addr: pos.tokenAddress, price };
+      });
+
+      const results = await Promise.all(pricePromises);
+      for (const { addr, price } of results) {
         if (price && price > 0) {
-          freshPrices.set(pos.tokenAddress, price);
+          freshPrices.set(addr, price);
           fetchedCount++;
         } else {
           failedCount++;
         }
       }
+
       if (freshPrices.size > 0) {
         this.riskManager.updatePrices(freshPrices);
       }
@@ -493,6 +503,57 @@ export class TelegramBot {
       `📂 *Open Positions*${mode}\n\n${summary}${priceIndicator}`,
       { parse_mode: 'Markdown', ...keyboard }
     );
+  }
+
+  private async handlePnL(ctx: Context): Promise<void> {
+    const allPositions = Array.from(this.riskManager['positions'].values());
+    if (!allPositions.length) {
+      await ctx.reply('📭 Belum ada trading history.', { parse_mode: 'Markdown' });
+      return;
+    }
+
+    const closed = allPositions.filter((p: Position) => p.status === 'CLOSED');
+    const open = this.riskManager.getOpenPositions();
+
+    // Calculate totals
+    const totalTrades = allPositions.length;
+    const winCount = closed.filter((p: Position) => (p.pnlPct ?? 0) > 0).length;
+    const lossCount = closed.filter((p: Position) => (p.pnlPct ?? 0) <= 0).length;
+    const avgPnl = closed.length
+      ? closed.reduce((a: number, p: Position) => a + (p.pnlPct ?? 0), 0) / closed.length
+      : 0;
+    const totalSol = allPositions.reduce((a: number, p: Position) => a + p.amountSol, 0);
+
+    // Open PnL (live)
+    let openPnlTotal = 0;
+    let openPnlStr = '';
+    if (open.length) {
+      for (const pos of open) {
+        const currentPrice = this.riskManager.getLastKnownPrice(pos.tokenAddress) ?? pos.entryPriceUsd;
+        if (pos.entryPriceUsd > 0) {
+          const pnl = ((currentPrice - pos.entryPriceUsd) / pos.entryPriceUsd) * 100;
+          openPnlTotal += pnl;
+        }
+      }
+      const avgOpen = openPnlTotal / open.length;
+      openPnlStr = `🟢 Open: ${open.length} | Avg: ${avgOpen >= 0 ? '+' : ''}${avgOpen.toFixed(2)}%\n`;
+    }
+
+    const text =
+      `📊 *PnL Summary*\n\n` +
+      `💰 Total Trades: *${totalTrades}* (${totalSol.toFixed(1)} SOL)\n` +
+      `📁 Closed: *${closed.length}* | 🟢 Open: *${open.length}*\n` +
+      `✅ Wins: *${winCount}* | ❌ Losses: *${lossCount}*\n` +
+      `📈 Avg PnL: *${avgPnl >= 0 ? '+' : ''}${avgPnl.toFixed(2)}%*\n\n` +
+      (openPnlStr ? `${openPnlStr}\n` : '') +
+      (closed.length
+        ? `*Last 5 closed:*\n` +
+          closed.slice(-5).reverse().map((p: Position) =>
+            `• *${safeSymbol(p.symbol)}* ${(p.pnlPct ?? 0) >= 0 ? '📈' : '📉'} ${(p.pnlPct ?? 0) >= 0 ? '+' : ''}${(p.pnlPct ?? 0).toFixed(2)}%`
+          ).join('\n')
+        : '');
+
+    await ctx.reply(text, { parse_mode: 'Markdown' });
   }
 
   private async handleSignals(ctx: Context): Promise<void> {
@@ -875,20 +936,60 @@ export class TelegramBot {
       status: 'PENDING',
     };
 
+    // ── Build alert message & keyboard (sebelum timer) ──────
+    const tokenAge    = Math.floor(token.ageSeconds / 3600);
+    const tokenAgeMin = Math.floor((token.ageSeconds % 3600) / 60);
+    const confEmoji   = ({ HIGH: '🔥', MEDIUM: '⚡', LOW: '💡' } as Record<string,string>)[signal.confidence];
+    const safeSymbolStr = safeSymbol(token.symbol);
+
+    // Balance warning untuk LIVE mode
+    const balanceWarning = !isDryRun
+      ? `⚠️ Pastikan wallet punya ≥${tradeParams.amountSol + 0.001} SOL (trade + fee)\n`
+      : '';
+
+    // Compact signal format
+    const message =
+      (isDryRun ? `🧪 *DRY RUN* ` : '') +
+      `🎯 *${signal.confidence}* ${confEmoji} | *${safeSymbolStr}*\n` +
+      `📊 $${formatNumber(token.mcapUsd)} | 💧 $${formatNumber(token.liquidityUsd)} | 🕐 ${tokenAge}h${tokenAgeMin}m | _just now_\n\n` +
+      `📈 EMA${signal.emaTouched} Touch ✅ | RSI K:${signal.stochRsiK.toFixed(1)} D:${signal.stochRsiD.toFixed(1)} | ${signal.stochRsiBottoming ? '📉 BOTTOMING' : '➖ Normal'}\n\n` +
+      `💰 ${tradeParams.amountSol} SOL${isDryRun ? ' paper' : ''} | Slippage ${tradeParams.slippagePct}% | Impact ${quoteResult.priceImpactPct.toFixed(2)}%\n` +
+      `${balanceWarning}` +
+      `🔗 [DexScreener](https://dexscreener.com/solana/${token.address}) | [GMGN](https://gmgn.ai/sol/token/${token.address})\n\n` +
+      (isDryRun
+        ? `_⏰ ${ttlMin}min — Klik SIMULATE atau SKIP_`
+        : `⏰ ${ttlMin}min — Klik APPROVE atau CANCEL`);
+
+    const approveLabel = isDryRun
+      ? `🧪 SIMULATE (${tradeParams.amountSol} SOL paper)`
+      : `✅ APPROVE BUY (${tradeParams.amountSol} SOL)`;
+
+    const keyboard = Markup.inlineKeyboard([
+      [Markup.button.callback(approveLabel, `APPROVE_${approvalId}`)],
+      [Markup.button.callback('❌ CANCEL', `CANCEL_${approvalId}`)],
+      [Markup.button.callback('🔄 Refresh Price', `REFRESH_APPROVAL_${approvalId}`)],
+    ]);
+
     this.pendingApprovals.set(approvalId, request);
 
-    // ── Reminder di setengah TTL ──────────────────────────────
+    // ── Reminder: edit pesan asli tambahin sisa waktu ─────────
     const reminderTimer = setTimeout(async () => {
       if (!this.pendingApprovals.has(approvalId)) return;
-      logger.info(MODULE, `Reminder: ${token.symbol}`);
-      await this.sendMessage(
-        `⏰ *Reminder — Signal Belum Direspons*\n\n` +
-        `🪙 *${token.symbol}* [${signal.confidence}]\n` +
-        `EMA${signal.emaTouched} | RSI K:${signal.stochRsiK.toFixed(1)}\n` +
-        `MCap: $${formatNumber(token.mcapUsd)}\n\n` +
-        `Tersisa *${reminderMin} menit* sebelum expired.\n` +
-        `Scroll ke atas untuk klik tombol.`
-      );
+      const req = this.pendingApprovals.get(approvalId);
+      if (!req?.messageId) return;
+
+      logger.info(MODULE, `Reminder edit: ${token.symbol}`);
+      try {
+        await this.bot.telegram.editMessageText(
+          config.telegram.chatId,
+          req.messageId,
+          undefined,
+          message + `\n\n_⏰ ${reminderMin}min remaining — segera klik tombol_`,
+          { parse_mode: 'Markdown', link_preview_options: { is_disabled: true }, ...keyboard }
+        );
+      } catch {
+        // Ignore edit errors
+      }
     }, REMINDER_AT_MS);
 
     // ── Auto-expire saat TTL habis ────────────────────────────
@@ -903,7 +1004,6 @@ export class TelegramBot {
 
       logger.info(MODULE, `Signal expired (${ttlMin}min): ${token.symbol}`);
 
-      // Edit pesan signal jadi EXPIRED (tanpa tombol) — user tau ini sudah expired
       if (req?.messageId) {
         try {
           await this.bot.telegram.editMessageText(
@@ -923,43 +1023,13 @@ export class TelegramBot {
       }
     }, APPROVAL_TTL_MS);
 
-    // ── Build alert message ───────────────────────────────────
-    const tokenAge    = Math.floor(token.ageSeconds / 3600);
-    const tokenAgeMin = Math.floor((token.ageSeconds % 3600) / 60);
-    const confEmoji   = ({ HIGH: '🔥', MEDIUM: '⚡', LOW: '💡' } as Record<string,string>)[signal.confidence];
-
-    const safeSymbolStr = safeSymbol(token.symbol);
-    const safeNameStr = safeSymbol(token.name);
-
-    // Compact signal format — lebih pendek supaya gak terlalu panjang
-    const message =
-      (isDryRun ? `🧪 *DRY RUN* ` : '') +
-      `🎯 *${signal.confidence}* ${confEmoji} | *${safeSymbolStr}*\n` +
-      `📊 $${formatNumber(token.mcapUsd)} | 💧 $${formatNumber(token.liquidityUsd)} | 🕐 ${tokenAge}h${tokenAgeMin}m\n\n` +
-      `📈 EMA${signal.emaTouched} Touch ✅ | RSI K:${signal.stochRsiK.toFixed(1)} D:${signal.stochRsiD.toFixed(1)} | ${signal.stochRsiBottoming ? '📉 BOTTOMING' : '➖ Normal'}\n\n` +
-      `💰 ${tradeParams.amountSol} SOL${isDryRun ? ' paper' : ''} | Slippage ${tradeParams.slippagePct}% | Impact ${quoteResult.priceImpactPct.toFixed(2)}%\n` +
-      `🔗 [DexScreener](https://dexscreener.com/solana/${token.address}) | [GMGN](https://gmgn.ai/sol/token/${token.address})\n\n` +
-      (isDryRun
-        ? `_⏰ ${ttlMin}min — Klik SIMULATE atau SKIP_`
-        : `⏰ ${ttlMin}min — Klik APPROVE atau CANCEL`);
-
-    const approveLabel = isDryRun
-      ? `🧪 SIMULATE (${tradeParams.amountSol} SOL paper)`
-      : `✅ APPROVE BUY (${tradeParams.amountSol} SOL)`;
-
-    const keyboard = Markup.inlineKeyboard([
-      [Markup.button.callback(approveLabel, `APPROVE_${approvalId}`)],
-      [Markup.button.callback('❌ CANCEL', `CANCEL_${approvalId}`)],
-      [Markup.button.callback('🔄 Refresh Price', `REFRESH_APPROVAL_${approvalId}`)],
-    ]);
-
+    // ── Kirim alert message ───────────────────────────────────
     try {
       const sent = await this.bot.telegram.sendMessage(config.telegram.chatId, message, {
         parse_mode: 'Markdown',
         ...keyboard,
         link_preview_options: { is_disabled: true },
       } as Parameters<typeof this.bot.telegram.sendMessage>[2]);
-      // Simpan messageId supaya bisa di-edit saat expired
       request.messageId = sent.message_id;
       logger.info(MODULE, `Alert sent: ${token.symbol} (msg:${sent.message_id})`);
     } catch (err) {
@@ -1109,6 +1179,7 @@ export class TelegramBot {
         { command: 'start',      description: '🏠 Menu utama' },
         { command: 'status',     description: '📊 Status bot & scanner' },
         { command: 'positions',  description: '📂 Open positions' },
+        { command: 'pnl',        description: '📊 Total PnL summary' },
         { command: 'settings',   description: '⚙️ Ubah parameter trading' },
         { command: 'scan',       description: '🔍 Trigger scan manual' },
         { command: 'missed',     description: '⏭ Signal yang terlewat' },
