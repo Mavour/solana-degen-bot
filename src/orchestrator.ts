@@ -83,7 +83,7 @@ export class BotOrchestrator {
     // Wire /scan command ke runScanCycle
     this.telegramBot.onManualScan(async () => {
       await this.telegramBot.sendMessage('🔍 *Scan manual dimulai...*');
-      await this.runScanCycle();
+      await this.runScanCycle(true); // isManual = true
     });
   }
 
@@ -104,7 +104,7 @@ export class BotOrchestrator {
 
   // ── Scan Cycle ────────────────────────────────────────────────
 
-  private async runScanCycle(): Promise<void> {
+  private async runScanCycle(isManual: boolean = false): Promise<void> {
     if (this.isScanInProgress) {
       logger.debug(MODULE, 'Scan in progress — skipping tick');
       return;
@@ -126,6 +126,14 @@ export class BotOrchestrator {
 
       if (!tokens.length) {
         logger.info(MODULE, 'No tokens passed filters');
+        // Kirim ke Telegram kalau ini scan manual (supaya user tau)
+        if (isManual) {
+          await this.telegramBot.sendMessage(
+            `🔄 *Scan selesai* — [${source.toUpperCase()}]\n` +
+            `📭 Tidak ada token yang lolos filter.\n` +
+            `_Coba lagi nanti._`
+          );
+        }
         return;
       }
 
@@ -140,7 +148,32 @@ export class BotOrchestrator {
 
       if (!signals.length) {
         logger.info(MODULE, 'No signals from scanned tokens');
+        // Kirim ke Telegram kalau ini scan manual
+        if (isManual) {
+          const tokenList = tokens.slice(0, 5).map(t =>
+            `• ${t.symbol} $${(t.mcapUsd/1000).toFixed(0)}K`
+          ).join('\n');
+          await this.telegramBot.sendMessage(
+            `🔄 *Scan selesai* — [${source.toUpperCase()}]\n` +
+            `📊 ${tokens.length} token lolos filter, belum ada signal EMA+RSI.\n\n` +
+            `*Token:*\n${tokenList}\n\n` +
+            `_Signal butuh: harga di EMA + Stoch RSI < 20_`
+          );
+        }
         return;
+      }
+
+      // Ada signal — proses
+      if (isManual) {
+        await this.telegramBot.sendMessage(
+          `🔄 *Scan selesai* — [${source.toUpperCase()}]\n` +
+          `📡 ${signals.length} signal ditemukan!\n` +
+          `Cek alert di atas untuk detail.`
+        );
+      }
+      for (const signal of signals) {
+        await this.processSignal(signal);
+        await sleep(500);
       }
 
       // Ada signal — proses
@@ -329,7 +362,7 @@ export class BotOrchestrator {
 
     // Jadwal scan utama
     this.scanTask = cron.schedule(secondsToCron(config.scanning.intervalSeconds), () => {
-      this.runScanCycle().catch((e) => logger.error(MODULE, 'Scan cron error', e));
+      this.runScanCycle(false).catch((e) => logger.error(MODULE, 'Scan cron error', e));
     });
 
     // Monitor position — pakai setInterval bukan cron (lebih reliable)
@@ -348,7 +381,7 @@ export class BotOrchestrator {
 
     // Initial scan + monitor langsung (supaya /positions punya harga setelah restart)
     await sleep(2000);
-    this.runScanCycle().catch((e) => logger.error(MODULE, 'Initial scan error', e));
+    this.runScanCycle(false).catch((e) => logger.error(MODULE, 'Initial scan error', e));
     await sleep(3000);
     this.runMonitorCycle().catch((e) => logger.error(MODULE, 'Initial monitor error', e));
   }
