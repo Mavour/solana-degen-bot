@@ -3,9 +3,8 @@
 
 import dotenv from 'dotenv';
 import path from 'path';
-import { SettingsStore, RuntimeSettings } from '../utils/settings';
+import { writeFileSync, readFileSync, existsSync } from 'fs';
 
-SettingsStore.init();
 dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 
 function requireEnv(key: string): string {
@@ -27,6 +26,41 @@ export const FREE_RPC_ENDPOINTS = [
   'https://solana-mainnet.rpc.extrnode.com',
   'https://rpc.ankr.com/solana',
 ] as const;
+
+// Settings file path
+const SETTINGS_FILE = path.resolve(process.cwd(), 'data/settings.json');
+
+export interface RuntimeSettings {
+  maxTradeSol?: number;
+  slippageMinPct?: number;
+  slippageMaxPct?: number;
+  maxPriceImpactPct?: number;
+  stopLossPct?: number;
+  takeProfitPct?: number;
+  scanIntervalSeconds?: number;
+  monitorIntervalSeconds?: number;
+  dryRun?: boolean;
+}
+
+function loadSettings(): RuntimeSettings {
+  try {
+    if (existsSync(SETTINGS_FILE)) {
+      const raw = readFileSync(SETTINGS_FILE, 'utf-8');
+      return JSON.parse(raw) as RuntimeSettings;
+    }
+  } catch {
+    // Ignore errors
+  }
+  return {};
+}
+
+function saveSettings(settings: RuntimeSettings): void {
+  try {
+    writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
+  } catch {
+    // Ignore errors
+  }
+}
 
 // Mutable config — bisa di-override runtime via /settings di Telegram
 export let config = buildConfig();
@@ -87,7 +121,7 @@ function buildConfig() {
   };
 
   // Override dengan settings.json kalau ada
-  const runtime = SettingsStore.get();
+  const runtime = loadSettings();
   applyToConfig(base, runtime);
 
   return base;
@@ -124,10 +158,11 @@ export function applyRuntimeSettings(settings: Partial<RuntimeSettings>): string
   }
 
   // Persist ke JSON
-  SettingsStore.set(settings);
+  const current = loadSettings();
+  saveSettings({ ...current, ...settings });
 
   // Update config in-memory
-  const newRuntime = SettingsStore.get();
+  const newRuntime = loadSettings();
   applyToConfig(config, newRuntime);
 
   return needsRestart;

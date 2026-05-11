@@ -5,7 +5,6 @@ import { Telegraf, Markup, Context } from 'telegraf';
 import axios from 'axios';
 import { config, applyRuntimeSettings } from '../config';
 import { logger } from '../utils/logger';
-import { SettingsStore } from '../utils/settings';
 import { ApprovalRequest, SignalResult, QuoteResult, SimulationResult, TradeParams, Position } from '../utils/types';
 import type { ExitSignal } from '../risk/manager';
 import { RiskManager } from '../risk/manager';
