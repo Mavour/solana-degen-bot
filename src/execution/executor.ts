@@ -230,10 +230,16 @@ export class TradeExecutor {
       const exitPriceUsd = cachedPrice ?? freshPrice ?? position.entryPriceUsd;
       this.dryRunExecutor.closePaperTrade(tokenAddress, exitPriceUsd);
       this.riskManager.closePosition(position.id, exitPriceUsd);
+      // Simulasi SOL received untuk dry run
+      const solReceivedDryRun = position.entryPriceUsd > 0
+        ? position.amountSol * (exitPriceUsd / position.entryPriceUsd)
+        : position.amountSol;
       await this.telegramBot.sendSellResult(symbol, true, {
         side: 'SELL',
         exitPriceUsd,
         pnlPct: ((exitPriceUsd - position.entryPriceUsd) / position.entryPriceUsd) * 100,
+        solReceived: solReceivedDryRun,
+        amountSol: position.amountSol,
       });
       return;
     }
@@ -324,6 +330,7 @@ export class TradeExecutor {
       solReceived,
       exitPriceUsd,
       pnlPct,
+      amountSol: position.amountSol,
     });
   }
 }

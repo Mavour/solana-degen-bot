@@ -28,8 +28,10 @@ export interface ExitSignal {
 export class RiskManager extends EventEmitter {
   private positions: Map<string, Position> = new Map();
   private pendingApprovals: Set<string> = new Set();
-  // Track kalau RSI sudah pernah peak untuk posisi ini (biar ga spam alert)
+  // Track alert yang sudah dikirim (biar ga spam tiap cycle)
   private rsiPeakAlerted: Set<string> = new Set();
+  private stopLossAlerted: Set<string> = new Set();
+  private takeProfitAlerted: Set<string> = new Set();
   // Harga terakhir — diupdate dari monitor cycle tiap 2 menit
   private lastKnownPrices: Map<string, number> = new Map();
   private store: PositionStore | null = null;
@@ -103,7 +105,10 @@ export class RiskManager extends EventEmitter {
     position.exitTimestamp = Date.now();
     position.pnlPct = ((exitPriceUsd - position.entryPriceUsd) / position.entryPriceUsd) * 100;
     this.positions.set(positionId, position);
+    // Clear semua alert tracking untuk position ini
     this.rsiPeakAlerted.delete(positionId);
+    this.stopLossAlerted.delete(positionId);
+    this.takeProfitAlerted.delete(positionId);
 
     logger.info(MODULE, `Position closed: ${position.symbol} | PnL: ${position.pnlPct.toFixed(2)}%`);
     this.emit('position:closed', { position, exitPriceUsd, pnlPct: position.pnlPct });
@@ -204,7 +209,8 @@ export class RiskManager extends EventEmitter {
       }
 
       // ── 3: Stop Loss % (safety net) ──
-      if (pnlPct <= -config.risk.stopLossPct) {
+      if (pnlPct <= -config.risk.stopLossPct && !this.stopLossAlerted.has(position.id)) {
+        this.stopLossAlerted.add(position.id);
         const signal: ExitSignal = {
           position,
           reason: 'STOP_LOSS_PCT',
@@ -220,9 +226,10 @@ export class RiskManager extends EventEmitter {
       }
 
       // ── 4: Take Profit % (opsional alert kalau RSI belum peak) ──
-      else if (pnlPct >= config.risk.takeProfitPct) {
+      else if (pnlPct >= config.risk.takeProfitPct && !this.takeProfitAlerted.has(position.id)) {
         // Hanya alert kalau RSI belum peak (biar tidak double-alert)
         if (!this.rsiPeakAlerted.has(position.id)) {
+          this.takeProfitAlerted.add(position.id);
           const signal: ExitSignal = {
             position,
             reason: 'TAKE_PROFIT_PCT',

@@ -1066,15 +1066,24 @@ export class TelegramBot {
   async sendSellResult(
     symbol: string,
     success: boolean,
-    details: { bundleId?: string; error?: string; solReceived?: number; exitPriceUsd?: number; pnlPct?: number; side?: 'SELL' }
+    details: { bundleId?: string; error?: string; solReceived?: number; exitPriceUsd?: number; pnlPct?: number; side?: 'SELL'; amountSol?: number }
   ): Promise<void> {
     const safeSym = safeSymbol(symbol);
+    // Hitung PnL dalam SOL
+    let solPnlLine = '';
+    if (details.solReceived !== undefined && details.amountSol !== undefined) {
+      const solPnl = details.solReceived - details.amountSol;
+      const solPnlEmoji = solPnl >= 0 ? '🟢' : '🔴';
+      solPnlLine = `${solPnlEmoji} SOL PnL: ${solPnl >= 0 ? '+' : ''}${solPnl.toFixed(4)} SOL ` +
+        `(${details.pnlPct !== undefined ? (details.pnlPct >= 0 ? '+' : '') + details.pnlPct.toFixed(2) : '0.00'}%)\n`;
+    }
     const message = success
       ? `✅ *SELL EXECUTED*\n\n` +
         `🪙 Token: ${safeSym}\n` +
-        (details.solReceived ? `💰 SOL received: ~${details.solReceived.toFixed(4)} SOL\n` : '') +
+        (details.amountSol ? `💎 SOL invested: ${details.amountSol.toFixed(4)} SOL\n` : '') +
+        (details.solReceived ? `💰 SOL received: ${details.solReceived.toFixed(4)} SOL\n` : '') +
+        solPnlLine +
         (details.exitPriceUsd ? `💵 Exit price: $${details.exitPriceUsd.toFixed(8)}\n` : '') +
-        (details.pnlPct !== undefined ? `📊 PnL: ${details.pnlPct >= 0 ? '+' : ''}${details.pnlPct.toFixed(2)}%\n` : '') +
         (details.bundleId ? `📦 Bundle: ${details.bundleId.slice(0, 12)}...\n` : '')
       : `❌ *SELL FAILED*\n\n` +
         `🪙 Token: ${safeSym}\n` +
