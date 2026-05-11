@@ -674,12 +674,15 @@ export class TelegramBot {
     const scanMin = config.scanning.intervalSeconds / 60;
     const monMin = config.monitor.intervalSeconds / 60;
 
+    const volK = (config.trading.minVolumeUsd24h / 1000).toFixed(0);
+
     const text =
       `⚙️ *Settings — ${mode}*\n\n` +
       `💰 *Trade*\n` +
       `• Trade Size: *${config.trading.maxTradeSol} SOL*\n` +
       `• Slippage: *${config.trading.slippageMinPct} – ${config.trading.slippageMaxPct}%*\n` +
-      `• Max Impact: *${config.trading.maxPriceImpactPct}%*\n\n` +
+      `• Max Impact: *${config.trading.maxPriceImpactPct}%*\n` +
+      `• Min Volume: *$${volK}K* (24h)\n\n` +
       `🛡 *Risk*\n` +
       `• Stop Loss: *-${config.risk.stopLossPct}%*\n` +
       `• Take Profit: *+${config.risk.takeProfitPct}%*\n\n` +
@@ -690,6 +693,7 @@ export class TelegramBot {
 
     const keyboard = Markup.inlineKeyboard([
       [Markup.button.callback(`💰 Trade Size (${config.trading.maxTradeSol} SOL)`, 'SET_maxTradeSol')],
+      [Markup.button.callback(`📊 Min Volume ($${volK}K)`, 'SET_minVolumeUsd24h')],
       [Markup.button.callback(`🛡 Stop Loss (${config.risk.stopLossPct}%)`, 'SET_stopLossPct')],
       [Markup.button.callback(`🎯 Take Profit (${config.risk.takeProfitPct}%)`, 'SET_takeProfitPct')],
       [Markup.button.callback(`⚡ Slippage Min (${config.trading.slippageMinPct}%)`, 'SET_slippageMinPct')],
@@ -711,6 +715,7 @@ export class TelegramBot {
 
     const labels: Record<string, string> = {
       maxTradeSol: 'Trade Size (SOL)',
+      minVolumeUsd24h: 'Min Volume 24h (USD)',
       stopLossPct: 'Stop Loss (%)',
       takeProfitPct: 'Take Profit (%)',
       slippageMinPct: 'Slippage Min (%)',

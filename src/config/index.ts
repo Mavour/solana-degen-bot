@@ -35,6 +35,7 @@ export interface RuntimeSettings {
   slippageMinPct?: number;
   slippageMaxPct?: number;
   maxPriceImpactPct?: number;
+  minVolumeUsd24h?: number;
   stopLossPct?: number;
   takeProfitPct?: number;
   scanIntervalSeconds?: number;
@@ -98,6 +99,8 @@ function buildConfig() {
       slippageMaxPct: parseFloat(optionalEnv('SLIPPAGE_MAX_PCT', '3.0')),
       maxMcapUsd: parseFloat(optionalEnv('MAX_MCAP_USD', '5000000')),
       minFeeSolPer1kMcap: parseFloat(optionalEnv('MIN_FEE_SOL_PER_1K_MCAP', '0.1')),
+      // Minimum volume 24h — koin sepi = susah jual = slippage besar
+      minVolumeUsd24h: parseFloat(optionalEnv('MIN_VOLUME_USD_24H', '50000')),
     },
     scanning: {
       intervalSeconds: parseInt(optionalEnv('SCAN_INTERVAL_SECONDS', '180')),
@@ -132,6 +135,7 @@ function applyToConfig(base: any, runtime: RuntimeSettings) {
   if (runtime.slippageMinPct !== undefined) base.trading.slippageMinPct = runtime.slippageMinPct;
   if (runtime.slippageMaxPct !== undefined) base.trading.slippageMaxPct = runtime.slippageMaxPct;
   if (runtime.maxPriceImpactPct !== undefined) base.trading.maxPriceImpactPct = runtime.maxPriceImpactPct;
+  if (runtime.minVolumeUsd24h !== undefined) base.trading.minVolumeUsd24h = runtime.minVolumeUsd24h;
   if (runtime.stopLossPct !== undefined) base.risk.stopLossPct = runtime.stopLossPct;
   if (runtime.takeProfitPct !== undefined) base.risk.takeProfitPct = runtime.takeProfitPct;
   if (runtime.scanIntervalSeconds !== undefined) base.scanning.intervalSeconds = runtime.scanIntervalSeconds;

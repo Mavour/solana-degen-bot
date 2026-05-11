@@ -218,6 +218,13 @@ export class GMGNScanner {
         continue;
       }
 
+      // Volume 24h minimal — koin sepi = susah jual
+      const volume24h = token.volume_24h || token.volume || 0;
+      if (volume24h > 0 && volume24h < config.trading.minVolumeUsd24h) {
+        logger.debug(MODULE, `Skip ${symbol}: volume24h $${(volume24h/1000).toFixed(0)}K < min $${(config.trading.minVolumeUsd24h/1000).toFixed(0)}K`);
+        continue;
+      }
+
       results.push(token);
     }
 

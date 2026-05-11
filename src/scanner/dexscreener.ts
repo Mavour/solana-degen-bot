@@ -153,6 +153,13 @@ export class DexScreenerScanner {
         continue;
       }
 
+      // Volume 24h minimal — koin sepi = susah jual
+      const vol24h = pair.volume?.h24 ?? 0;
+      if (vol24h > 0 && vol24h < config.trading.minVolumeUsd24h) {
+        logger.debug(MODULE, `Skip ${symbol}: vol24h $${(vol24h/1000).toFixed(0)}K < min $${(config.trading.minVolumeUsd24h/1000).toFixed(0)}K`);
+        continue;
+      }
+
       // Harus ada harga
       const price = parseFloat(pair.priceUsd ?? '0');
       if (price <= 0) continue;
