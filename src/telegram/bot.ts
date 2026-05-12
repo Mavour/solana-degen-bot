@@ -830,6 +830,18 @@ export class TelegramBot {
       return;
     }
 
+    // Re-check risk guard — posisi mungkin sudah terbuka dari alert lain
+    const riskCheck = this.riskManager.canTrade(request.signal.token.address);
+    if (!riskCheck.allowed) {
+      await ctx.answerCbQuery('❌ Trade dibatalkan');
+      await ctx.editMessageText(
+        `❌ *TRADE DIBATALKAN*\n\nToken: ${request.signal.token.symbol}\nAlasan: ${riskCheck.reason}`,
+        { parse_mode: 'Markdown' }
+      );
+      logger.info(MODULE, `Trade APPROVED blocked: ${request.signal.token.symbol} — ${riskCheck.reason}`);
+      return;
+    }
+
     request.status = 'APPROVED';
     await ctx.answerCbQuery('✅ Executing...');
     await ctx.editMessageText(
@@ -916,6 +928,19 @@ export class TelegramBot {
 
   onApprove(callback: ApprovalCallback): void {
     this.onApproveCallback = callback;
+  }
+
+  /**
+   * Cek apakah token ini masih punya approval request yang pending.
+   * Dipakai orchestrator untuk mencegah spam alert berulang.
+   */
+  hasPendingApprovalForToken(tokenAddress: string): boolean {
+    for (const req of this.pendingApprovals.values()) {
+      if (req.signal.token.address === tokenAddress && req.status === 'PENDING') {
+        return true;
+      }
+    }
+    return false;
   }
 
   async sendSignalAlert(

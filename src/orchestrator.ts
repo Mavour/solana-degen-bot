@@ -175,12 +175,6 @@ export class BotOrchestrator {
         await this.processSignal(signal);
         await sleep(500);
       }
-
-      // Ada signal — proses
-      for (const signal of signals) {
-        await this.processSignal(signal);
-        await sleep(500);
-      }
     } catch (err) {
       this.consecutiveScanFailures++;
       logger.error(MODULE, `Scan error (${this.consecutiveScanFailures}/3)`, err);
@@ -206,6 +200,13 @@ export class BotOrchestrator {
     const riskEval = this.riskManager.evaluateSignal(signal);
     if (!riskEval.shouldAlert) {
       logger.debug(MODULE, `⏭ ${token.symbol}: ${riskEval.reason}`);
+      return;
+    }
+
+    // Cegah duplicate alert untuk token yang sama masih pending
+    const alreadyPending = this.telegramBot.hasPendingApprovalForToken(token.address);
+    if (alreadyPending) {
+      logger.debug(MODULE, `⏭ ${token.symbol}: approval request masih pending`);
       return;
     }
 

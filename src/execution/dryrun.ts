@@ -69,41 +69,75 @@ export class DryRunExecutor {
     const tokensSimulated = Number(quoteResult.outAmount);
     const entryPriceUsd = token.priceUsd > 0 ? token.priceUsd : 0;
 
-    const paperTradeId = `paper_${++this.tradeCounter}_${Date.now()}`;
+    // ── Cek existing paper trade untuk token ini ──
+    const existing = Array.from(this.paperTrades.values()).find(
+      (t) => t.tokenAddress === token.address && t.status === 'OPEN'
+    );
 
-    const paperTrade: PaperTrade = {
-      id: paperTradeId,
-      symbol: token.symbol,
-      tokenAddress: token.address,
-      entryPriceUsd,
-      amountSol: tradeParams.amountSol,
-      tokensSimulated,
-      priceImpactPct: quoteResult.priceImpactPct,
-      slippagePct: tradeParams.slippagePct,
-      estimatedFeeSol: simulationResult.estimatedFeeSOL,
-      entryTimestamp: Date.now(),
-      signalConfidence: signal.confidence,
-      emaTouched: signal.emaTouched,
-      stochRsiK: signal.stochRsiK,
-      status: 'OPEN',
-    };
+    let paperTrade: PaperTrade;
+    let position: Position;
 
-    this.paperTrades.set(paperTradeId, paperTrade);
-    this.save();
+    if (existing) {
+      // ── CONSOLIDATE ──
+      const totalTokens = existing.tokensSimulated + tokensSimulated;
+      const totalSol = existing.amountSol + tradeParams.amountSol;
+      const newEntryPrice = totalTokens > 0
+        ? ((existing.entryPriceUsd * existing.tokensSimulated) + (entryPriceUsd * tokensSimulated)) / totalTokens
+        : existing.entryPriceUsd;
+
+      existing.amountSol = totalSol;
+      existing.tokensSimulated = totalTokens;
+      existing.entryPriceUsd = newEntryPrice;
+      existing.priceImpactPct = (existing.priceImpactPct + quoteResult.priceImpactPct) / 2;
+      existing.slippagePct = (existing.slippagePct + tradeParams.slippagePct) / 2;
+      existing.estimatedFeeSol += simulationResult.estimatedFeeSOL;
+      // txSignature gabung untuk tracking
+      existing.id = `${existing.id},paper_${++this.tradeCounter}_${Date.now()}`;
+
+      this.paperTrades.set(existing.id.split(',')[0], existing);
+      this.save();
+
+      paperTrade = existing;
+
+      logger.info(MODULE, `Paper trade consolidated: ${token.symbol} | total ${totalSol.toFixed(3)} SOL | avg entry $${newEntryPrice.toFixed(8)}`);
+    } else {
+      // ── NEW PAPER TRADE ──
+      const paperTradeId = `paper_${++this.tradeCounter}_${Date.now()}`;
+
+      paperTrade = {
+        id: paperTradeId,
+        symbol: token.symbol,
+        tokenAddress: token.address,
+        entryPriceUsd,
+        amountSol: tradeParams.amountSol,
+        tokensSimulated,
+        priceImpactPct: quoteResult.priceImpactPct,
+        slippagePct: tradeParams.slippagePct,
+        estimatedFeeSol: simulationResult.estimatedFeeSOL,
+        entryTimestamp: Date.now(),
+        signalConfidence: signal.confidence,
+        emaTouched: signal.emaTouched,
+        stochRsiK: signal.stochRsiK,
+        status: 'OPEN',
+      };
+
+      this.paperTrades.set(paperTradeId, paperTrade);
+      this.save();
+    }
 
     // Daftarkan sebagai real position di RiskManager supaya:
     // 1. canTrade() block token ini dari signal duplikat
     // 2. Monitor cycle bisa cek RSI exit
-    const position: Position = {
-      id: paperTradeId,
+    position = {
+      id: paperTrade.id,
       tokenAddress: token.address,
       symbol: token.symbol,
-      entryPriceUsd,
-      amountSol: tradeParams.amountSol,
-      tokensReceived: tokensSimulated,
-      tokensReceivedRaw: String(Math.floor(tokensSimulated)),
-      entryTimestamp: Date.now(),
-      txSignature: `[DRY_RUN_${paperTradeId}]`,
+      entryPriceUsd: paperTrade.entryPriceUsd,
+      amountSol: paperTrade.amountSol,
+      tokensReceived: paperTrade.tokensSimulated,
+      tokensReceivedRaw: String(Math.floor(paperTrade.tokensSimulated)),
+      entryTimestamp: paperTrade.entryTimestamp,
+      txSignature: `[DRY_RUN_${paperTrade.id}]`,
       status: 'OPEN',
     };
 

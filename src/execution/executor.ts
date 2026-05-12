@@ -83,6 +83,17 @@ export class TradeExecutor {
 
     // ── DRY RUN INTERCEPT ──────────────────────────────────
     if (config.dryRun) {
+      // Re-check risk guard — bisa saja posisi sudah terbuka dari alert lain
+      const riskCheck = this.riskManager.canTrade(token.address);
+      if (!riskCheck.allowed) {
+        logger.warn(MODULE, `🧪 [DRY RUN] Risk check failed: ${riskCheck.reason}`);
+        await this.telegramBot.sendTradeResult(token.symbol, false, {
+          amountSol: tradeParams.amountSol,
+          error: riskCheck.reason,
+        });
+        this.riskManager.clearPendingApproval(token.address);
+        return;
+      }
       logger.info(MODULE, `🧪 [DRY RUN] Routing to paper executor: ${token.symbol}`);
       await this.dryRunExecutor.simulateTrade(request);
       return;

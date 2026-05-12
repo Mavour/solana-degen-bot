@@ -88,6 +88,39 @@ export class RiskManager extends EventEmitter {
   }
 
   addPosition(position: Position): void {
+    const existing = Array.from(this.positions.values()).find(
+      (p) => p.tokenAddress === position.tokenAddress && p.status === 'OPEN'
+    );
+
+    if (existing) {
+      // ── CONSOLIDATE: merge ke posisi yang sudah ada ──
+      const totalTokens = existing.tokensReceived + position.tokensReceived;
+      const totalSol = existing.amountSol + position.amountSol;
+
+      // Weighted average entry price (berbasis tokensReceived)
+      const newEntryPrice = totalTokens > 0
+        ? ((existing.entryPriceUsd * existing.tokensReceived) + (position.entryPriceUsd * position.tokensReceived)) / totalTokens
+        : existing.entryPriceUsd;
+
+      existing.amountSol = totalSol;
+      existing.tokensReceived = totalTokens;
+      existing.tokensReceivedRaw = String(
+        parseInt(existing.tokensReceivedRaw || String(Math.floor(existing.tokensReceived)), 10) +
+        parseInt(position.tokensReceivedRaw || String(Math.floor(position.tokensReceived)), 10)
+      );
+      existing.entryPriceUsd = newEntryPrice;
+      // txSignature disimpan sebagai array gabungan (string) untuk tracking
+      existing.txSignature = `${existing.txSignature},${position.txSignature}`;
+
+      this.positions.set(existing.id, existing);
+      this.clearPendingApproval(position.tokenAddress);
+      logger.info(MODULE, `Position consolidated: ${existing.symbol} | +${position.amountSol} SOL → total ${totalSol.toFixed(3)} SOL | avg entry $${newEntryPrice.toFixed(8)}`);
+      this.emit('position:opened', existing);
+      this.save();
+      return;
+    }
+
+    // ── NEW POSITION ──
     this.positions.set(position.id, position);
     this.clearPendingApproval(position.tokenAddress);
     this.rsiPeakAlerted.delete(position.id); // reset on new position
