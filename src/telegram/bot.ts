@@ -814,10 +814,10 @@ export class TelegramBot {
     }
 
     this.pendingApprovals.delete(approvalId);
+    this.riskManager.clearPendingApproval(request.signal.token.address);
 
     if (action === 'REJECTED') {
       request.status = 'REJECTED';
-      this.riskManager.clearPendingApproval(request.signal.token.address);
       this.sentAlertMessages.delete(request.signal.token.address);
 
       // Simpan ke missed (cancelled by user)
