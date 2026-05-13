@@ -91,6 +91,8 @@ export class TelegramBot {
   private tradeExecutor: TradeExecutor | null = null;
   private onManualScanCallback: (() => Promise<void>) | null = null;
   private editingSettings: Map<number, string> = new Map(); // chatId -> paramKey
+  /** Tracking pesan alert terakhir per token — untuk hapus sebelum kirim baru */
+  private sentAlertMessages: Map<string, number> = new Map();
 
   onManualScan(cb: () => Promise<void>): void {
     this.onManualScanCallback = cb;
@@ -805,6 +807,7 @@ export class TelegramBot {
     if (action === 'REJECTED') {
       request.status = 'REJECTED';
       this.riskManager.clearPendingApproval(request.signal.token.address);
+      this.sentAlertMessages.delete(request.signal.token.address);
 
       // Simpan ke missed (cancelled by user)
       this.addMissed(request.signal, 'CANCELLED');
@@ -822,6 +825,7 @@ export class TelegramBot {
     if (Date.now() - request.timestamp > APPROVAL_TTL_MS) {
       request.status = 'EXPIRED';
       this.riskManager.clearPendingApproval(request.signal.token.address);
+      this.sentAlertMessages.delete(request.signal.token.address);
       await ctx.answerCbQuery('⏰ Request sudah expired');
       await ctx.editMessageText(
         `⏰ *REQUEST EXPIRED*\n\nToken: ${request.signal.token.symbol}`,
@@ -833,6 +837,7 @@ export class TelegramBot {
     // Re-check risk guard — posisi mungkin sudah terbuka dari alert lain
     const riskCheck = this.riskManager.canTrade(request.signal.token.address);
     if (!riskCheck.allowed) {
+      this.sentAlertMessages.delete(request.signal.token.address);
       await ctx.answerCbQuery('❌ Trade dibatalkan');
       await ctx.editMessageText(
         `❌ *TRADE DIBATALKAN*\n\nToken: ${request.signal.token.symbol}\nAlasan: ${riskCheck.reason}`,
@@ -843,6 +848,7 @@ export class TelegramBot {
     }
 
     request.status = 'APPROVED';
+    this.sentAlertMessages.delete(request.signal.token.address);
     await ctx.answerCbQuery('✅ Executing...');
     await ctx.editMessageText(
       `⏳ *EXECUTING TRADE...*\n\nToken: ${request.signal.token.symbol}\nMengirim via Jito Bundle...`,
@@ -1029,6 +1035,7 @@ export class TelegramBot {
       const req = this.pendingApprovals.get(approvalId);
       this.pendingApprovals.delete(approvalId);
       this.riskManager.clearPendingApproval(token.address);
+      this.sentAlertMessages.delete(token.address);
       this.addMissed(signal, 'EXPIRED');
 
       logger.info(MODULE, `Signal expired (${ttlMin}min): ${token.symbol}`);
@@ -1052,6 +1059,17 @@ export class TelegramBot {
       }
     }, APPROVAL_TTL_MS);
 
+    // ── Hapus alert lama untuk token yang sama ────────────────
+    const oldMessageId = this.sentAlertMessages.get(token.address);
+    if (oldMessageId) {
+      try {
+        await this.bot.telegram.deleteMessage(config.telegram.chatId, oldMessageId);
+        logger.info(MODULE, `Deleted old alert for ${token.symbol} (msg:${oldMessageId})`);
+      } catch {
+        // Pesan mungkin sudah dihapus user atau expired — abaikan error
+      }
+    }
+
     // ── Kirim alert message ───────────────────────────────────
     try {
       const sent = await this.bot.telegram.sendMessage(config.telegram.chatId, message, {
@@ -1060,6 +1078,7 @@ export class TelegramBot {
         link_preview_options: { is_disabled: true },
       } as Parameters<typeof this.bot.telegram.sendMessage>[2]);
       request.messageId = sent.message_id;
+      this.sentAlertMessages.set(token.address, sent.message_id);
       logger.info(MODULE, `Alert sent: ${token.symbol} (msg:${sent.message_id})`);
     } catch (err) {
       logger.error(MODULE, 'Failed to send alert', err);
