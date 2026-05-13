@@ -41,9 +41,19 @@ export class TradeSimulator {
     const slippagePct = calculateDynamicSlippage(volatility);
     logger.info(MODULE, `${token.symbol} | Volatility: ${(volatility * 100).toFixed(2)}% | Slippage: ${slippagePct}%`);
 
+    // 1b. Confidence-based position sizing
+    const confidenceMultiplier =
+      signal.confidence === 'HIGH' ? 1.0 :
+      signal.confidence === 'MEDIUM' ? 0.6 : 0.3;
+    const sizedTradeSol = Math.max(
+      0.01,
+      config.trading.maxTradeSol * confidenceMultiplier
+    );
+    logger.info(MODULE, `${token.symbol} | Confidence:${signal.confidence} | Size:${sizedTradeSol.toFixed(3)} SOL (${(confidenceMultiplier*100).toFixed(0)}%)`);
+
     const tradeParams: TradeParams = {
       tokenAddress: token.address,
-      amountSol: config.trading.maxTradeSol,
+      amountSol: sizedTradeSol,
       slippagePct,
       maxPriceImpactPct: config.trading.maxPriceImpactPct,
     };

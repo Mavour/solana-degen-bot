@@ -122,7 +122,7 @@ export class DexScreenerScanner {
       const quoteSymbol = pair.quoteToken?.symbol ?? '';
       if (!['SOL', 'WSOL', 'USDC', 'USDT'].includes(quoteSymbol)) continue;
 
-      // Age > threshold (kalau tidak ada data createdAt, loloskan saja)
+      // Age > threshold
       if (pair.pairCreatedAt) {
         const ageMs = now - pair.pairCreatedAt;
         if (ageMs < config.trading.minTokenAgeSeconds * 1000) {
@@ -142,18 +142,36 @@ export class DexScreenerScanner {
         continue;
       }
 
-      // NOTE: DexScreener tidak expose fee data dalam SOL.
-      // Fee filter (Obicle 1:10) hanya aktif di GMGN (primary source).
-      // Token dari DexScreener lolos tanpa fee check.
+      // ── STRICT DEGEN FILTERS ──
+      const priceChange1h = pair.priceChange?.h1 ?? 0;
+      const priceChange24h = pair.priceChange?.h24 ?? 0;
 
-      // Liquidity minimal $3K
+      // Avoid massive dumps
+      if (priceChange1h < -20) {
+        logger.debug(MODULE, `Skip ${symbol}: 1h dump ${priceChange1h.toFixed(1)}%`);
+        continue;
+      }
+      if (priceChange24h < -40) {
+        logger.debug(MODULE, `Skip ${symbol}: 24h dump ${priceChange24h.toFixed(1)}%`);
+        continue;
+      }
+
+      // Avoid already pumped >300%
+      if (priceChange1h > 300) {
+        logger.debug(MODULE, `Skip ${symbol}: already pumped ${priceChange1h.toFixed(0)}% in 1h`);
+        continue;
+      }
+
+      // NOTE: DexScreener tidak expose fee data dalam SOL.
+
+      // Liquidity minimal $5K (raised)
       const liq = pair.liquidity?.usd ?? 0;
-      if (liq > 0 && liq < 3000) {
+      if (liq > 0 && liq < 5000) {
         logger.debug(MODULE, `Skip ${symbol}: liq $${liq.toFixed(0)} too low`);
         continue;
       }
 
-      // Volume 24h minimal — koin sepi = susah jual
+      // Volume 24h minimal
       const vol24h = pair.volume?.h24 ?? 0;
       if (vol24h > 0 && vol24h < config.trading.minVolumeUsd24h) {
         logger.debug(MODULE, `Skip ${symbol}: vol24h $${(vol24h/1000).toFixed(0)}K < min $${(config.trading.minVolumeUsd24h/1000).toFixed(0)}K`);

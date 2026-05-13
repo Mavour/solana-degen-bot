@@ -76,6 +76,10 @@ export interface Position {
   exitPriceUsd?: number;
   exitTimestamp?: number;
   pnlPct?: number;
+  // ── Risk tracking ──
+  confidence?: 'LOW' | 'MEDIUM' | 'HIGH';
+  highestPriceUsd?: number; // for trailing stop
+  partialExitDone?: boolean;
 }
 
 export interface ApprovalRequest {

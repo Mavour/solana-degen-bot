@@ -372,6 +372,9 @@ export class TelegramBot {
       RSI_DROP:        '📉 *RSI TURUN DARI PEAK — MOMENTUM BERBALIK*',
       STOP_LOSS_PCT:   '🚨 *STOP LOSS — JUAL SEGERA*',
       TAKE_PROFIT_PCT: '🎯 *TARGET PROFIT TERCAPAI*',
+      TRAILING_STOP:   '🛡 *TRAILING STOP — PROFIT DIKUNCI*',
+      PARTIAL_PROFIT:  '💰 *PARTIAL PROFIT — JUAL SEBAGIAN*',
+      TIME_EXIT:       '⏰ *TIME EXIT — POSISI STAGNAN*',
     };
 
     const urgency: Record<string, string> = {
@@ -379,6 +382,9 @@ export class TelegramBot {
       RSI_DROP:        '⚠️ Momentum sudah berbalik — pertimbangkan exit',
       STOP_LOSS_PCT:   '🔴 *Loss melebihi threshold — exit manual segera*',
       TAKE_PROFIT_PCT: '💡 Tunggu RSI peak >80 untuk exit optimal',
+      TRAILING_STOP:   '🛡 Profit sudah turun dari peak — jual sebelum loss!',
+      PARTIAL_PROFIT:  '💰 Lock profit 50% dulu, sisanya biarkan jalan',
+      TIME_EXIT:       '⏰ Posisi terlalu lama stagnan — cut loss & cari lain',
     };
 
     const text =
@@ -435,9 +441,10 @@ export class TelegramBot {
       `⏳ Pending approvals: ${pending}\n` +
       `⏭ Missed signals: ${this.missedSignals.length}\n\n` +
       `⚙️ *Config*\n` +
-      `• Trade: ${config.trading.maxTradeSol} SOL\n` +
+      `• Trade: ${config.trading.maxTradeSol} SOL (size by confidence)\n` +
       `• MCap: $${(config.trading.minMcapUsd/1000).toFixed(0)}K – $${(config.trading.maxMcapUsd/1000000).toFixed(0)}M\n` +
-      `• Stop Loss: -${config.risk.stopLossPct}%\n` +
+      `• Stop Loss: -${config.risk.stopLossPct}% | Trailing: ON\n` +
+      `• Partial TP: ON | Time Exit: ON\n` +
       `• RSI exit: >80\n` +
       `• Scan: tiap ${config.scanning.intervalSeconds / 60} menit\n` +
       `• Alert TTL: ${ttlMin} menit\n\n` +
@@ -657,13 +664,17 @@ export class TelegramBot {
       `5. Alert expired setelah ${ttlMin} menit — message asli di-edit jadi ⏰ EXPIRED\n` +
       `6. Bot monitor RSI tiap 2 menit, alert lagi saat RSI peak lebih dari 80\n` +
       `7. Klik SELL NOW di alert exit, atau di /positions untuk jual manual\n\n` +
-      `*Entry signal (Obicle method):*\n` +
-      `• Harga menyentuh EMA 25/50/100/200\n` +
-      `• Stoch RSI di bawah 20 (bottoming)\n\n` +
+      `*Entry signal (Obicle v2):*\n` +
+      `• Harga menyentuh EMA di UPTREND\n` +
+      `• Stoch RSI di bawah 20 (bottoming)\n` +
+      `• Volume confirmation & trend filter\n` +
+      `• LOW confidence signals skipped\n\n` +
       `*Exit alerts:*\n` +
-      `📈 RSI Peak lebih dari 80 — pertimbangkan jual\n` +
-      `📉 RSI drop setelah peak — momentum berbalik\n` +
-      `🚨 Loss lebih dari -${config.risk.stopLossPct}% — stop loss\n\n` +
+      `🚨 Stop loss -${config.risk.stopLossPct}% (tight)\n` +
+      `🛡 Trailing stop setelah +15%\n` +
+      `💰 Partial profit di +30% (jual 50%)\n` +
+      `⏰ Time exit setelah 4 jam stagnan\n` +
+      `📈 RSI Peak lebih dari 80\n\n` +
       `*Mode saat ini:* ${config.dryRun ? '🧪 DRY RUN — tidak ada tx nyata' : '🟢 LIVE TRADING'}`,
       { parse_mode: 'Markdown' }
     );
@@ -1137,7 +1148,7 @@ export class TelegramBot {
   }
 
   async sendExitSignalAlert(signal: ExitSignal): Promise<void> {
-    const { position, reason, pnlPct, stochRsiK, stochRsiD } = signal;
+    const { position, reason, pnlPct, stochRsiK, stochRsiD, isPartial } = signal;
     const pnlStr = `${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%`;
     const safeSym = safeSymbol(position.symbol);
 
@@ -1146,6 +1157,9 @@ export class TelegramBot {
       RSI_DROP:        '📉 *RSI TURUN DARI PEAK — MOMENTUM BERBALIK*',
       STOP_LOSS_PCT:   '🚨 *STOP LOSS — JUAL SEGERA*',
       TAKE_PROFIT_PCT: '🎯 *TARGET PROFIT TERCAPAI*',
+      TRAILING_STOP:   '🛡 *TRAILING STOP — PROFIT DIKUNCI*',
+      PARTIAL_PROFIT:  '💰 *PARTIAL PROFIT — JUAL SEBAGIAN*',
+      TIME_EXIT:       '⏰ *TIME EXIT — POSISI STAGNAN*',
     };
 
     const urgency: Record<string, string> = {
@@ -1153,6 +1167,9 @@ export class TelegramBot {
       RSI_DROP:        '⚠️ Momentum sudah berbalik — pertimbangkan exit',
       STOP_LOSS_PCT:   '🔴 *Loss melebihi threshold — exit manual segera*',
       TAKE_PROFIT_PCT: '💡 Tunggu RSI peak >80 untuk exit optimal',
+      TRAILING_STOP:   '🛡 Profit sudah turun dari peak — jual sebelum loss!',
+      PARTIAL_PROFIT:  '💰 Lock profit 50% dulu, sisanya biarkan jalan',
+      TIME_EXIT:       '⏰ Posisi terlalu lama stagnan — cut loss & cari lain',
     };
 
     const rsiInfo = stochRsiK !== undefined
@@ -1170,10 +1187,11 @@ export class TelegramBot {
       rsiInfo +
       `⏱ Hold: ${holdMin}m\n\n` +
       `${urgency[reason] ?? ''}\n\n` +
+      (isPartial ? `_⚠️ Ini alert PARTIAL — jual sebagian posisi saja_\n\n` : '') +
       `🔗 [DexScreener](https://dexscreener.com/solana/${position.tokenAddress})`;
 
     const keyboard = Markup.inlineKeyboard([
-      [Markup.button.callback(`🔴 SELL NOW ${safeSym}`, `SELL_${position.id}`)],
+      [Markup.button.callback(`🔴 SELL NOW ${safeSym}${isPartial ? ' (50%)' : ''}`, `SELL_${position.id}`)],
       [Markup.button.callback('🔄 Refresh Price', `REFRESH_EXIT_${position.id}`)],
       [Markup.button.callback('✖️ DISMISS', 'DISMISS_EXIT')],
     ]);

@@ -15,14 +15,25 @@ const RSI_PEAK_EXIT_THRESHOLD = 80;
 // RSI stop-loss threshold — keluar paksa kalau RSI sudah drop terlalu dalam dari peak
 const RSI_STOP_THRESHOLD = 15;
 
+// ── Risk Config ──
+const TRAILING_STOP_ENABLED = (process.env.TRAILING_STOP_ENABLED ?? 'true') === 'true';
+const TRAILING_STOP_ACTIVATION_PCT = parseFloat(process.env.TRAILING_STOP_ACTIVATION_PCT ?? '15');
+const TRAILING_STOP_DISTANCE_PCT = parseFloat(process.env.TRAILING_STOP_DISTANCE_PCT ?? '10');
+const PARTIAL_TP_ENABLED = (process.env.PARTIAL_TP_ENABLED ?? 'true') === 'true';
+const PARTIAL_TP_PCT = parseFloat(process.env.PARTIAL_TP_PCT ?? '30');
+const PARTIAL_TP_SIZE_PCT = parseFloat(process.env.PARTIAL_TP_SIZE_PCT ?? '50');
+const TIME_EXIT_MINUTES = parseInt(process.env.TIME_EXIT_MINUTES ?? '240'); // 4 hours
+const TIME_EXIT_PNL_THRESHOLD = parseFloat(process.env.TIME_EXIT_PNL_THRESHOLD ?? '-2');
+
 export interface ExitSignal {
   position: Position;
-  reason: 'RSI_PEAK' | 'RSI_DROP' | 'STOP_LOSS_PCT' | 'TAKE_PROFIT_PCT';
+  reason: 'RSI_PEAK' | 'RSI_DROP' | 'STOP_LOSS_PCT' | 'TAKE_PROFIT_PCT' | 'TRAILING_STOP' | 'PARTIAL_PROFIT' | 'TIME_EXIT';
   currentPrice: number;
   pnlPct: number;
   stochRsiK?: number;
   stochRsiD?: number;
   message: string;
+  isPartial?: boolean;
 }
 
 export class RiskManager extends EventEmitter {
@@ -168,13 +179,16 @@ export class RiskManager extends EventEmitter {
   }
 
   /**
-   * ── EXIT SIGNAL CHECK (Obicle strategy) ──────────────────────────────────
+   * ── EXIT SIGNAL CHECK v2 ────────────────────────────────────────────────
    * Di-call dari monitor cycle tiap 2 menit.
    * Checks (dalam urutan prioritas):
-   *  1. RSI Peak (>80)    → EXIT SIGNAL sesuai PDF
-   *  2. RSI Drop (<15)    → RSI sudah balik turun dari peak, konfirmasi exit
-   *  3. Stop Loss %       → fallback kalau RSI tidak sempat peak
-   *  4. Take Profit %     → fallback profit target
+   *  1. Stop Loss %       → tight safety net (default 8%)
+   *  2. Trailing Stop     → proteksi profit setelah +15%
+   *  3. Partial Profit    → jual 50% di +30%
+   *  4. Time Exit         → keluar kalau stagnan >4 jam
+   *  5. RSI Peak (>80)    → exit saat RSI di puncak
+   *  6. RSI Drop (<40)    → konfirmasi momentum berbalik
+   *  7. Take Profit %     → fallback hard target
    */
   checkExitSignals(
     currentPrices: Map<string, number>,
@@ -189,7 +203,94 @@ export class RiskManager extends EventEmitter {
       const pnlPct = ((currentPrice - position.entryPriceUsd) / position.entryPriceUsd) * 100;
       const ohlcv = currentOHLCV.get(position.tokenAddress);
 
-      // ── 1 & 2: RSI-based exit (dari PDF Obicle) ──
+      // ── Update highest price for trailing stop ──
+      if (!position.highestPriceUsd || currentPrice > position.highestPriceUsd) {
+        position.highestPriceUsd = currentPrice;
+        this.positions.set(position.id, position);
+      }
+
+      // ── 1: Stop Loss % (tight safety net) ──
+      if (pnlPct <= -config.risk.stopLossPct && !this.stopLossAlerted.has(position.id)) {
+        this.stopLossAlerted.add(position.id);
+        const signal: ExitSignal = {
+          position,
+          reason: 'STOP_LOSS_PCT',
+          currentPrice,
+          pnlPct,
+          message:
+            `🚨 STOP LOSS TRIGGERED — JUAL SEGERA\n` +
+            `Loss: ${pnlPct.toFixed(2)}% (threshold: -${config.risk.stopLossPct}%)`,
+        };
+        logger.warn(MODULE, `STOP LOSS: ${position.symbol} PnL:${pnlPct.toFixed(2)}%`);
+        exits.push(signal);
+        this.emit('exitSignal', signal);
+        continue; // stop checking other signals
+      }
+
+      // ── 2: Trailing Stop ──
+      if (TRAILING_STOP_ENABLED && position.highestPriceUsd) {
+        const peakPnl = ((position.highestPriceUsd - position.entryPriceUsd) / position.entryPriceUsd) * 100;
+        if (peakPnl >= TRAILING_STOP_ACTIVATION_PCT) {
+          const trailingThreshold = position.highestPriceUsd * (1 - TRAILING_STOP_DISTANCE_PCT / 100);
+          if (currentPrice <= trailingThreshold) {
+            const signal: ExitSignal = {
+              position,
+              reason: 'TRAILING_STOP',
+              currentPrice,
+              pnlPct,
+              message:
+                `🛡 TRAILING STOP — profit dikunci\n` +
+                `Peak: +${peakPnl.toFixed(2)}% | Now: ${pnlPct.toFixed(2)}%\n` +
+                `Jual sebelum profit hilang!`,
+            };
+            logger.warn(MODULE, `TRAILING STOP: ${position.symbol} peak:${peakPnl.toFixed(2)}% now:${pnlPct.toFixed(2)}%`);
+            exits.push(signal);
+            this.emit('exitSignal', signal);
+            continue;
+          }
+        }
+      }
+
+      // ── 3: Partial Take Profit ──
+      if (PARTIAL_TP_ENABLED && !position.partialExitDone && pnlPct >= PARTIAL_TP_PCT) {
+        position.partialExitDone = true;
+        this.positions.set(position.id, position);
+        const signal: ExitSignal = {
+          position,
+          reason: 'PARTIAL_PROFIT',
+          currentPrice,
+          pnlPct,
+          isPartial: true,
+          message:
+            `💰 PARTIAL PROFIT — jual ${PARTIAL_TP_SIZE_PCT}% posisi\n` +
+            `Profit: +${pnlPct.toFixed(2)}% | Lock ${PARTIAL_TP_SIZE_PCT}% dulu\n` +
+            `Sisanya tunggu RSI peak atau trailing stop`,
+        };
+        logger.info(MODULE, `PARTIAL TP: ${position.symbol} +${pnlPct.toFixed(2)}%`);
+        exits.push(signal);
+        this.emit('exitSignal', signal);
+        // Don't continue — still monitor remaining position
+      }
+
+      // ── 4: Time-based Exit ──
+      const ageMinutes = (Date.now() - position.entryTimestamp) / 60000;
+      if (ageMinutes >= TIME_EXIT_MINUTES && pnlPct <= TIME_EXIT_PNL_THRESHOLD) {
+        const signal: ExitSignal = {
+          position,
+          reason: 'TIME_EXIT',
+          currentPrice,
+          pnlPct,
+          message:
+            `⏰ TIME EXIT — posisi stagnan ${Math.floor(ageMinutes)} menit\n` +
+            `PnL: ${pnlPct.toFixed(2)}% | Cut loss & cari opportunity lain`,
+        };
+        logger.warn(MODULE, `TIME EXIT: ${position.symbol} age:${Math.floor(ageMinutes)}m PnL:${pnlPct.toFixed(2)}%`);
+        exits.push(signal);
+        this.emit('exitSignal', signal);
+        continue;
+      }
+
+      // ── 5 & 6: RSI-based exit ──
       if (ohlcv && ohlcv.length >= 40) {
         const stochRsi = this.calculateStochRSI(ohlcv.map(c => c.close));
 
@@ -219,7 +320,6 @@ export class RiskManager extends EventEmitter {
           }
 
           // RSI Drop setelah peak: K balik turun ke bawah 40 setelah sempat di atas 80
-          // Ini sinyal konfirmasi bahwa momentum sudah berbalik
           if (this.rsiPeakAlerted.has(position.id) && k < 40 && d < 40) {
             const signal: ExitSignal = {
               position,
@@ -236,31 +336,13 @@ export class RiskManager extends EventEmitter {
             logger.warn(MODULE, `RSI DROP after peak: ${position.symbol} K:${k.toFixed(1)} PnL:${pnlPct.toFixed(2)}%`);
             exits.push(signal);
             this.emit('exitSignal', signal);
-            this.rsiPeakAlerted.delete(position.id); // reset agar bisa detect peak lagi
+            this.rsiPeakAlerted.delete(position.id);
           }
         }
       }
 
-      // ── 3: Stop Loss % (safety net) ──
-      if (pnlPct <= -config.risk.stopLossPct && !this.stopLossAlerted.has(position.id)) {
-        this.stopLossAlerted.add(position.id);
-        const signal: ExitSignal = {
-          position,
-          reason: 'STOP_LOSS_PCT',
-          currentPrice,
-          pnlPct,
-          message:
-            `🚨 STOP LOSS TRIGGERED — JUAL SEGERA\n` +
-            `Loss: ${pnlPct.toFixed(2)}% (threshold: -${config.risk.stopLossPct}%)`,
-        };
-        logger.warn(MODULE, `STOP LOSS: ${position.symbol} PnL:${pnlPct.toFixed(2)}%`);
-        exits.push(signal);
-        this.emit('exitSignal', signal);
-      }
-
-      // ── 4: Take Profit % (opsional alert kalau RSI belum peak) ──
-      else if (pnlPct >= config.risk.takeProfitPct && !this.takeProfitAlerted.has(position.id)) {
-        // Hanya alert kalau RSI belum peak (biar tidak double-alert)
+      // ── 7: Hard Take Profit % ──
+      if (pnlPct >= config.risk.takeProfitPct && !this.takeProfitAlerted.has(position.id)) {
         if (!this.rsiPeakAlerted.has(position.id)) {
           this.takeProfitAlerted.add(position.id);
           const signal: ExitSignal = {
@@ -344,6 +426,12 @@ export class RiskManager extends EventEmitter {
     if (signal.token.holders > 0 && signal.token.holders < 50) {
       return { shouldAlert: false, reason: `Too few holders (${signal.token.holders})` };
     }
+
+    // Skip LOW confidence — terlalu banyak noise, buruk untuk win rate
+    if (signal.confidence === 'LOW') {
+      return { shouldAlert: false, reason: `LOW confidence skipped (trend/volume too weak)` };
+    }
+
     return { shouldAlert: true };
   }
 }

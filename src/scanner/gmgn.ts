@@ -171,7 +171,7 @@ export class GMGNScanner {
   }
 
   /**
-   * Filter tokens sesuai kriteria Obicle
+   * Filter tokens sesuai kriteria Obicle + strict degen filters
    */
   filterTokens(tokens: any[]): any[] {
     const now = Math.floor(Date.now() / 1000);
@@ -183,6 +183,9 @@ export class GMGNScanner {
       const liquidity = token.liquidity || token.pool_liquidity_usd || 0;
       const volume = token.volume || token.volume_1h || token.swaps_1h || 0;
       const symbol = token.symbol || token.token_symbol || 'UNKNOWN';
+      const priceChange1h = token.price_change_percent1h || token.price_change_1h || 0;
+      const priceChange24h = token.price_change_percent24h || token.price_change_24h || 0;
+      const holders = token.holder_count || token.holders || 0;
 
       // Extract fee data — Obicle filter: fee / mcap >= 10%
       const feeSol = token.total_fee_sol ?? token.fee_sol ?? token.total_fee ?? token.fee ?? 0;
@@ -195,7 +198,6 @@ export class GMGNScanner {
       }
 
       // MCap filter: min $150K — max $5M (default)
-      // Kalau tidak ada data mcap, pakai relaxed threshold
       const minMcap = mcap > 0 ? config.trading.minMcapUsd : 100000;
       if (mcap > 0 && mcap < minMcap) {
         logger.debug(MODULE, `Skip ${symbol}: mcap $${(mcap/1000).toFixed(0)}K < $${(minMcap/1000).toFixed(0)}K`);
@@ -206,19 +208,45 @@ export class GMGNScanner {
         continue;
       }
 
-      // Obicle fee filter: fee SOL harus >= 10% dari market cap (dalam SOL numeric)
-      if (minFeeSol > 0 && feeSol < minFeeSol) {
-        logger.debug(MODULE, `Skip ${symbol}: fee ${feeSol.toFixed(2)} SOL < min ${minFeeSol.toFixed(2)} SOL (mcap $${(mcap/1000).toFixed(0)}K)`);
+      // ── STRICT DEGEN FILTERS ──
+
+      // Minimum holders — avoid dead/rug tokens
+      if (holders > 0 && holders < 80) {
+        logger.debug(MODULE, `Skip ${symbol}: too few holders (${holders})`);
         continue;
       }
 
-      // Liquidity minimal (relaxed: $3K)
-      if (liquidity > 0 && liquidity < 3000) {
+      // Avoid massive 1h dumps (>20% in 1h = likely rug or panic)
+      if (priceChange1h < -20) {
+        logger.debug(MODULE, `Skip ${symbol}: 1h dump ${priceChange1h.toFixed(1)}%`);
+        continue;
+      }
+
+      // Avoid tokens dumping hard in 24h
+      if (priceChange24h < -40) {
+        logger.debug(MODULE, `Skip ${symbol}: 24h dump ${priceChange24h.toFixed(1)}%`);
+        continue;
+      }
+
+      // Avoid already pumped >300% in 1h (FOMO top)
+      if (priceChange1h > 300) {
+        logger.debug(MODULE, `Skip ${symbol}: already pumped ${priceChange1h.toFixed(0)}% in 1h`);
+        continue;
+      }
+
+      // Obicle fee filter
+      if (minFeeSol > 0 && feeSol < minFeeSol) {
+        logger.debug(MODULE, `Skip ${symbol}: fee ${feeSol.toFixed(2)} SOL < min ${minFeeSol.toFixed(2)} SOL`);
+        continue;
+      }
+
+      // Liquidity minimal $5K (raised from $3K)
+      if (liquidity > 0 && liquidity < 5000) {
         logger.debug(MODULE, `Skip ${symbol}: liquidity $${liquidity.toFixed(0)} too low`);
         continue;
       }
 
-      // Volume 24h minimal — koin sepi = susah jual
+      // Volume 24h minimal
       const volume24h = token.volume_24h || token.volume || 0;
       if (volume24h > 0 && volume24h < config.trading.minVolumeUsd24h) {
         logger.debug(MODULE, `Skip ${symbol}: volume24h $${(volume24h/1000).toFixed(0)}K < min $${(config.trading.minVolumeUsd24h/1000).toFixed(0)}K`);

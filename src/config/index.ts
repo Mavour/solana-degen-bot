@@ -113,7 +113,7 @@ function buildConfig() {
     },
     risk: {
       maxOpenPositions: parseInt(optionalEnv('MAX_OPEN_POSITIONS', '3')),
-      stopLossPct: parseFloat(optionalEnv('STOP_LOSS_PCT', '15')),
+      stopLossPct: parseFloat(optionalEnv('STOP_LOSS_PCT', '8')),
       takeProfitPct: parseFloat(optionalEnv('TAKE_PROFIT_PCT', '50')),
     },
     dryRun: optionalEnv('DRY_RUN', 'false') === 'true',

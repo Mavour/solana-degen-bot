@@ -204,6 +204,9 @@ export class TradeExecutor {
       entryTimestamp: Date.now(),
       txSignature: result.bundleId ?? 'jito_bundle',
       status: 'OPEN',
+      confidence: signal.confidence,
+      highestPriceUsd: entryPriceUsd,
+      partialExitDone: false,
     };
 
     this.riskManager.addPosition(position);

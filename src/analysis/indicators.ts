@@ -23,11 +23,20 @@ const STOCH_RSI_CONFIG = {
 };
 
 // Threshold: RSI bottoming jika di bawah nilai ini
-// Relaxed dari 20 ke 25 — lebih banyak signal, tetap reasonable
-const RSI_BOTTOMING_THRESHOLD = parseInt(process.env.RSI_BOTTOMING_THRESHOLD ?? '25');
+const RSI_BOTTOMING_THRESHOLD = parseInt(process.env.RSI_BOTTOMING_THRESHOLD ?? '20');
 // EMA touch tolerance: harga dalam X% dari EMA dianggap "touching"
-// Relaxed dari 1.5% ke 2.5% — meme coin lebih volatile
-const EMA_TOUCH_TOLERANCE_PCT = parseFloat(process.env.EMA_TOUCH_TOLERANCE_PCT ?? '2.5');
+const EMA_TOUCH_TOLERANCE_PCT = parseFloat(process.env.EMA_TOUCH_TOLERANCE_PCT ?? '2.0');
+
+// ── Trend Filter Config ──
+// Hanya buy jika harga di atas EMA ini (trend bullish)
+const TREND_EMA_PERIOD = parseInt(process.env.TREND_EMA_PERIOD ?? '50');
+// Hanya buy jika EMA pendek > EMA panjang (alignment bullish)
+const FAST_EMA_PERIOD = parseInt(process.env.FAST_EMA_PERIOD ?? '25');
+const SLOW_EMA_PERIOD = parseInt(process.env.SLOW_EMA_PERIOD ?? '50');
+// Maximum price drop 1h yang diperbolehkan (hindari catching falling knife)
+const MAX_1H_DROP_PCT = parseFloat(process.env.MAX_1H_DROP_PCT ?? '-15');
+// Minimum volume surge ratio (volume saat ini vs rata-rata)
+const MIN_VOLUME_SURGE_RATIO = parseFloat(process.env.MIN_VOLUME_SURGE_RATIO ?? '1.0');
 
 interface EMASeries {
   period: EMAPeriod;
@@ -166,16 +175,82 @@ export function calculateDynamicSlippage(volatility: number): number {
 }
 
 /**
+ * Hitung rata-rata volume dari candles
+ */
+function calculateAvgVolume(ohlcv: OHLCVCandle[], period: number = 20): number {
+  if (ohlcv.length < period) return 0;
+  const recent = ohlcv.slice(-period);
+  return recent.reduce((sum, c) => sum + c.volume, 0) / recent.length;
+}
+
+/**
+ * Cek volume surge: volume candle terakhir > rata-rata * ratio
+ */
+function hasVolumeSurge(ohlcv: OHLCVCandle[], ratio: number = MIN_VOLUME_SURGE_RATIO): boolean {
+  if (ohlcv.length < 5) return true; // insufficient data, allow
+  const avgVol = calculateAvgVolume(ohlcv, 20);
+  const lastVol = ohlcv[ohlcv.length - 1].volume;
+  if (avgVol <= 0) return true;
+  return lastVol >= avgVol * ratio;
+}
+
+/**
+ * Cek trend filter:
+ * 1. Price di atas trend EMA (bullish trend)
+ * 2. Fast EMA > Slow EMA (bullish alignment)
+ * 3. Harga tidak terlalu jauh di bawah EMA200 (bukan strong downtrend)
+ */
+function checkTrendFilter(emas: EMASeries[], currentPrice: number): {
+  passed: boolean;
+  aboveTrendEma: boolean;
+  emaAlignment: boolean;
+  notInStrongDowntrend: boolean;
+  trendScore: number; // 0-3
+} {
+  const trendEma = emas.find(e => e.period === TREND_EMA_PERIOD);
+  const fastEma = emas.find(e => e.period === FAST_EMA_PERIOD);
+  const slowEma = emas.find(e => e.period === SLOW_EMA_PERIOD);
+  const ema200 = emas.find(e => e.period === 200);
+
+  const aboveTrendEma = trendEma ? currentPrice > trendEma.currentValue : true;
+  const emaAlignment = fastEma && slowEma ? fastEma.currentValue > slowEma.currentValue : true;
+  // Strong downtrend: price > 20% below EMA200
+  const notInStrongDowntrend = ema200
+    ? currentPrice > ema200.currentValue * 0.80
+    : true;
+
+  let trendScore = 0;
+  if (aboveTrendEma) trendScore++;
+  if (emaAlignment) trendScore++;
+  if (notInStrongDowntrend) trendScore++;
+
+  return {
+    passed: aboveTrendEma && emaAlignment && notInStrongDowntrend,
+    aboveTrendEma,
+    emaAlignment,
+    notInStrongDowntrend,
+    trendScore,
+  };
+}
+
+/**
  * Main analysis: generate signal untuk satu token
+ * Strategy v2: EMA bounce di UPTREND + volume confirmation
  */
 export function analyzeToken(token: TokenInfo): SignalResult | null {
-  if (token.ohlcv.length < 35) {
-    logger.debug(MODULE, `${token.symbol}: insufficient OHLCV (${token.ohlcv.length} candles, need 35)`);
+  if (token.ohlcv.length < 50) {
+    logger.debug(MODULE, `${token.symbol}: insufficient OHLCV (${token.ohlcv.length} candles, need 50)`);
     return null;
   }
 
   const closes = token.ohlcv.map((c) => c.close);
   const currentPrice = closes[closes.length - 1];
+
+  // ── Filter: hindari token yang baru crash besar ──
+  if (token.priceChangePct1h < MAX_1H_DROP_PCT) {
+    logger.debug(MODULE, `${token.symbol}: Rejected — 1h drop ${token.priceChangePct1h.toFixed(1)}% < threshold ${MAX_1H_DROP_PCT}%`);
+    return null;
+  }
 
   // Calculate indicators
   const emas = calculateEMAs(closes);
@@ -186,12 +261,28 @@ export function analyzeToken(token: TokenInfo): SignalResult | null {
     return null;
   }
 
+  // ── Trend Filter ──
+  const trend = checkTrendFilter(emas, currentPrice);
+  if (!trend.passed) {
+    logger.debug(MODULE, `${token.symbol}: No signal — trend filter failed (score:${trend.trendScore}/3)`);
+    return null;
+  }
+
+  // ── Volume Confirmation ──
+  const volumeOk = hasVolumeSurge(token.ohlcv);
+  if (!volumeOk) {
+    logger.debug(MODULE, `${token.symbol}: No signal — volume below average`);
+    return null;
+  }
+
   // Log indicator values
   logger.debug(MODULE, `${token.symbol} indicators`, {
     price: currentPrice,
     stochK: stochRsi.k.toFixed(2),
     stochD: stochRsi.d.toFixed(2),
     emas: emas.map((e) => ({ period: e.period, value: e.currentValue.toFixed(6) })),
+    trendScore: trend.trendScore,
+    volOk: volumeOk,
   });
 
   // Cari EMA yang paling dekat dengan harga saat ini
@@ -209,22 +300,33 @@ export function analyzeToken(token: TokenInfo): SignalResult | null {
   const emaTouch = closestEMA !== null &&
     isPriceTouchingEMA(currentPrice, closestEMA.currentValue);
 
-  // Signal condition: EMA touch AND Stoch RSI bottoming
+  // Signal condition: EMA touch AND Stoch RSI bottoming AND trend OK AND volume OK
   if (!emaTouch || !stochRsi.isBottoming) {
     logger.debug(MODULE, `${token.symbol}: No signal (emaTouch=${emaTouch}, rsiBottom=${stochRsi.isBottoming})`);
     return null;
   }
 
-  // Hitung confidence
+  // Hitung confidence dengan bobot baru
   let confidence: 'LOW' | 'MEDIUM' | 'HIGH' = 'LOW';
   const emaTouchedCount = emas.filter((e) =>
     isPriceTouchingEMA(currentPrice, e.currentValue, 2.0)
   ).length;
 
-  if (stochRsi.k < 10 && stochRsi.d < 10 && emaTouchedCount >= 2) {
+  const strongTrend = trend.trendScore >= 3;
+  const strongRsi = stochRsi.k < 10 && stochRsi.d < 10;
+  const strongVolume = volumeOk && token.priceChangePct1h > 0;
+
+  if (strongRsi && emaTouchedCount >= 2 && strongTrend) {
     confidence = 'HIGH';
-  } else if (stochRsi.k < 15 && emaTouchedCount >= 1) {
+  } else if ((stochRsi.k < 15 && emaTouchedCount >= 1 && trend.trendScore >= 2) ||
+             (strongTrend && strongVolume)) {
     confidence = 'MEDIUM';
+  }
+
+  // Skip LOW confidence signals — terlalu banyak noise
+  if (confidence === 'LOW') {
+    logger.debug(MODULE, `${token.symbol}: LOW confidence skipped`);
+    return null;
   }
 
   const signal: SignalResult = {
@@ -239,7 +341,7 @@ export function analyzeToken(token: TokenInfo): SignalResult | null {
     timestamp: Date.now(),
   };
 
-  logger.info(MODULE, `🎯 SIGNAL: ${token.symbol} | EMA${closestEMA!.period} | Stoch K:${stochRsi.k.toFixed(1)} D:${stochRsi.d.toFixed(1)} | Confidence: ${confidence}`);
+  logger.info(MODULE, `🎯 SIGNAL: ${token.symbol} | EMA${closestEMA!.period} | Stoch K:${stochRsi.k.toFixed(1)} D:${stochRsi.d.toFixed(1)} | Trend:${trend.trendScore}/3 | Confidence:${confidence}`);
   return signal;
 }
 
