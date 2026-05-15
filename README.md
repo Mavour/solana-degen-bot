@@ -81,8 +81,8 @@ solana-degen-bot/
        ▼
 [Position Tracker]
  • Monitor P&L every 2 minutes
- • Stop-loss alert (default -15%)
- • Take-profit alert (default +50%)
+ • Auto stop-loss sell (configurable)
+ • Profit exits remain manual
 ```
 
 ---
@@ -131,7 +131,8 @@ pm2 logs solana-degen-bot
 | `MAX_PRICE_IMPACT_PCT` | `2.0` | Auto-cancel if impact > this |
 | `SLIPPAGE_MIN_PCT` | `0.5` | Dynamic slippage minimum |
 | `SLIPPAGE_MAX_PCT` | `3.0` | Dynamic slippage maximum |
-| `STOP_LOSS_PCT` | `15` | Stop-loss alert threshold |
+| `STOP_LOSS_PCT` | `15` | Auto stop-loss threshold |
+| `AUTO_STOP_LOSS_ENABLED` | `true` | Auto-sell only when hard stop-loss is hit |
 | `MAX_OPEN_POSITIONS` | `3` | Max concurrent positions |
 | `SCAN_INTERVAL_SECONDS` | `180` | Scanner frequency (3 min) |
 | `JITO_TIP_AMOUNT` | `0.0001` | Jito tip in SOL |
@@ -142,13 +143,14 @@ pm2 logs solana-degen-bot
 
 | Feature | Implementation |
 |---------|---------------|
-| **No Auto-Buy** | All trades require manual Telegram approval |
+| **No Auto-Buy** | All buys require manual Telegram approval |
+| **Manual Profit Exit** | Profit-taking alerts never auto-sell |
 | **MEV Protection** | Jito Bundle — immune to sandwich attacks |
 | **Price Impact Guard** | Auto-cancel if Jupiter impact > 2% |
 | **Transaction Simulation** | RPC simulate before execution |
 | **Dynamic Slippage** | Adapts to token volatility (0.5%–3%) |
 | **Position Limits** | Max 3 open positions simultaneously |
-| **Stop Loss Monitor** | Auto-alert at configurable threshold |
+| **Stop Loss Monitor** | Auto-sell at configurable hard stop-loss threshold |
 | **Private Key Safety** | Never logged, only in .env |
 | **Balance Pre-check** | Verifies SOL before execution |
 

@@ -253,6 +253,7 @@ export class DexScreenerScanner {
       priceChangePct1h: pair.priceChange?.h1 ?? 0,
       holders:      0,
       ohlcv:        this.buildSyntheticOHLCV(pair, price),
+      ohlcvSource:  'synthetic',
     };
   }
 

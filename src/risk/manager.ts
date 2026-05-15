@@ -210,15 +210,18 @@ export class RiskManager extends EventEmitter {
       }
 
       // ── 1: Stop Loss % (tight safety net) ──
-      if (pnlPct <= -config.risk.stopLossPct && !this.stopLossAlerted.has(position.id)) {
-        this.stopLossAlerted.add(position.id);
+      // In auto-SL mode, emit every monitor cycle until the position is closed.
+      // This lets the orchestrator retry if Jupiter/Jito fails on the first attempt.
+      const autoStopLoss = config.risk.autoStopLossEnabled;
+      if (pnlPct <= -config.risk.stopLossPct && (autoStopLoss || !this.stopLossAlerted.has(position.id))) {
+        if (!autoStopLoss) this.stopLossAlerted.add(position.id);
         const signal: ExitSignal = {
           position,
           reason: 'STOP_LOSS_PCT',
           currentPrice,
           pnlPct,
           message:
-            `🚨 STOP LOSS TRIGGERED — JUAL SEGERA\n` +
+            `🚨 STOP LOSS TRIGGERED — ${autoStopLoss ? 'AUTO SELL' : 'JUAL SEGERA'}\n` +
             `Loss: ${pnlPct.toFixed(2)}% (threshold: -${config.risk.stopLossPct}%)`,
         };
         logger.warn(MODULE, `STOP LOSS: ${position.symbol} PnL:${pnlPct.toFixed(2)}%`);
@@ -262,9 +265,9 @@ export class RiskManager extends EventEmitter {
           pnlPct,
           isPartial: true,
           message:
-            `💰 PARTIAL PROFIT — jual ${PARTIAL_TP_SIZE_PCT}% posisi\n` +
-            `Profit: +${pnlPct.toFixed(2)}% | Lock ${PARTIAL_TP_SIZE_PCT}% dulu\n` +
-            `Sisanya tunggu RSI peak atau trailing stop`,
+            `💰 PROFIT ALERT — keputusan jual manual\n` +
+            `Profit: +${pnlPct.toFixed(2)}% | Pertimbangkan lock profit\n` +
+            `Bot tidak auto-sell posisi profit`,
         };
         logger.info(MODULE, `PARTIAL TP: ${position.symbol} +${pnlPct.toFixed(2)}%`);
         exits.push(signal);

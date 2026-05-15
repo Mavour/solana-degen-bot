@@ -39,6 +39,7 @@ export class BotOrchestrator {
   private isMonitorInProgress: boolean = false;
   private consecutiveScanFailures: number = 0;
   private scannerDownAlerted: boolean = false;
+  private autoStopLossInProgress: Set<string> = new Set();
 
   constructor() {
     this.rpcManager  = new RPCConnectionManager();
@@ -90,6 +91,11 @@ export class BotOrchestrator {
   private setupRiskEvents(): void {
     // Single unified exit signal handler — covers RSI peak, stop loss, take profit
     this.riskManager.on('exitSignal', async (signal: ExitSignal) => {
+      if (signal.reason === 'STOP_LOSS_PCT' && config.risk.autoStopLossEnabled) {
+        await this.handleAutoStopLoss(signal);
+        return;
+      }
+
       await this.telegramBot.sendExitSignalAlert(signal);
     });
 
@@ -100,6 +106,37 @@ export class BotOrchestrator {
     this.riskManager.on('position:closed', (data: { position: { symbol: string }; pnlPct: number }) => {
       logger.info(MODULE, `📁 Closed: ${data.position.symbol} | PnL: ${data.pnlPct.toFixed(2)}%`);
     });
+  }
+
+  private async handleAutoStopLoss(signal: ExitSignal): Promise<void> {
+    const positionId = signal.position.id;
+    if (this.autoStopLossInProgress.has(positionId)) {
+      logger.debug(MODULE, `Auto SL already in progress: ${signal.position.symbol}`);
+      return;
+    }
+
+    this.autoStopLossInProgress.add(positionId);
+
+    try {
+      logger.warn(MODULE, `AUTO STOP LOSS: ${signal.position.symbol} PnL:${signal.pnlPct.toFixed(2)}%`);
+      await this.telegramBot.sendMessage(
+        `🚨 *AUTO STOP LOSS TRIGGERED*\n\n` +
+        `🪙 *${signal.position.symbol}*\n` +
+        `Loss: ${signal.pnlPct.toFixed(2)}% ` +
+        `(threshold: -${config.risk.stopLossPct}%)\n\n` +
+        `_Bot mengeksekusi SELL otomatis. Buy dan profit-taking tetap manual._`
+      );
+
+      const sold = await this.executor.executeSell(signal.position);
+      if (!sold) {
+        await this.telegramBot.sendExitSignalAlert(signal);
+      }
+    } catch (err) {
+      logger.error(MODULE, `Auto stop-loss failed for ${signal.position.symbol}`, err);
+      await this.telegramBot.sendExitSignalAlert(signal).catch(() => {});
+    } finally {
+      this.autoStopLossInProgress.delete(positionId);
+    }
   }
 
   // ── Scan Cycle ────────────────────────────────────────────────
@@ -352,7 +389,7 @@ export class BotOrchestrator {
       `• MCap range: $${(config.trading.minMcapUsd / 1000).toFixed(0)}K – $${(config.trading.maxMcapUsd / 1000000).toFixed(0)}M\n` +
       `• Min fee: ${config.trading.minFeeSolPer1kMcap} SOL per $1K mcap\n` +
       `• Min age: ${config.trading.minTokenAgeSeconds / 3600}h\n` +
-      `• Stop Loss: -${config.risk.stopLossPct}%\n` +
+      `• Stop Loss: -${config.risk.stopLossPct}% (${config.risk.autoStopLossEnabled ? 'AUTO SELL' : 'alert only'})\n` +
       `• RSI exit: K/D > 80 (Obicle method)\n` +
       `• Scan setiap: ${config.scanning.intervalSeconds / 60} menit\n` +
       `• Monitor: tiap ${config.monitor.intervalSeconds / 60} menit\n\n` +

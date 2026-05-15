@@ -14,6 +14,7 @@ export interface TokenInfo {
   holders: number;
   // OHLCV data for indicator calculation
   ohlcv: OHLCVCandle[];
+  ohlcvSource?: 'real' | 'synthetic';
 }
 
 export interface OHLCVCandle {

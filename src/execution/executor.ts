@@ -223,7 +223,7 @@ export class TradeExecutor {
    * Execute SELL trade (100% of position tokens → SOL).
    * Triggered by user clicking SELL button or /sell command.
    */
-  async executeSell(position: Position): Promise<void> {
+  async executeSell(position: Position): Promise<boolean> {
     const { symbol, tokenAddress, tokensReceivedRaw } = position;
 
     // Determine exact amount to sell
@@ -232,7 +232,7 @@ export class TradeExecutor {
       const reason = 'Invalid token amount for sell';
       logger.error(MODULE, reason);
       await this.telegramBot.sendSellResult(symbol, false, { error: reason });
-      return;
+      return false;
     }
 
     // ── DRY RUN INTERCEPT ──────────────────────────────────
@@ -255,7 +255,7 @@ export class TradeExecutor {
         solReceived: solReceivedDryRun,
         amountSol: position.amountSol,
       });
-      return;
+      return true;
     }
     // ───────────────────────────────────────────────────────
 
@@ -281,7 +281,7 @@ export class TradeExecutor {
       const reason = 'Failed to get fresh Jupiter sell quote';
       logger.error(MODULE, reason);
       await this.telegramBot.sendSellResult(symbol, false, { error: reason });
-      return;
+      return false;
     }
 
     // 3. Price impact check
@@ -289,7 +289,7 @@ export class TradeExecutor {
       const reason = `Sell price impact too high: ${freshQuote.priceImpactPct.toFixed(2)}% (max ${config.trading.maxPriceImpactPct}%)`;
       logger.warn(MODULE, reason);
       await this.telegramBot.sendSellResult(symbol, false, { error: reason });
-      return;
+      return false;
     }
 
     // 4. Build swap transaction (direction handled by quote)
@@ -304,7 +304,7 @@ export class TradeExecutor {
       const reason = 'Failed to build sell swap transaction';
       logger.error(MODULE, reason);
       await this.telegramBot.sendSellResult(symbol, false, { error: reason });
-      return;
+      return false;
     }
 
     // 5. Sign
@@ -323,7 +323,7 @@ export class TradeExecutor {
         bundleId: result.bundleId,
         error: result.error,
       });
-      return;
+      return false;
     }
 
     // 7. Success — close position
@@ -346,5 +346,6 @@ export class TradeExecutor {
       pnlPct,
       amountSol: position.amountSol,
     });
+    return true;
   }
 }

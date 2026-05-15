@@ -326,6 +326,7 @@ export class GMGNScanner {
             priceChangePct1h: t.price_change_percent1h || t.price_change_1h || 0,
             holders: t.holder_count || t.holders || 0,
             ohlcv: ohlcvData,
+            ohlcvSource: 'real',
           };
         }
       }
@@ -346,6 +347,7 @@ export class GMGNScanner {
           priceChangePct1h: 0,
           holders: 0,
           ohlcv: ohlcvData,
+          ohlcvSource: 'real',
         };
       }
 

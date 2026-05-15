@@ -373,7 +373,7 @@ export class TelegramBot {
       STOP_LOSS_PCT:   '🚨 *STOP LOSS — JUAL SEGERA*',
       TAKE_PROFIT_PCT: '🎯 *TARGET PROFIT TERCAPAI*',
       TRAILING_STOP:   '🛡 *TRAILING STOP — PROFIT DIKUNCI*',
-      PARTIAL_PROFIT:  '💰 *PARTIAL PROFIT — JUAL SEBAGIAN*',
+      PARTIAL_PROFIT:  '💰 *PROFIT ALERT — KEPUTUSAN MANUAL*',
       TIME_EXIT:       '⏰ *TIME EXIT — POSISI STAGNAN*',
     };
 
@@ -383,7 +383,7 @@ export class TelegramBot {
       STOP_LOSS_PCT:   '🔴 *Loss melebihi threshold — exit manual segera*',
       TAKE_PROFIT_PCT: '💡 Tunggu RSI peak >80 untuk exit optimal',
       TRAILING_STOP:   '🛡 Profit sudah turun dari peak — jual sebelum loss!',
-      PARTIAL_PROFIT:  '💰 Lock profit 50% dulu, sisanya biarkan jalan',
+      PARTIAL_PROFIT:  '💰 Profit sudah masuk target bertahap — jual hanya jika kamu setuju',
       TIME_EXIT:       '⏰ Posisi terlalu lama stagnan — cut loss & cari lain',
     };
 
@@ -443,7 +443,7 @@ export class TelegramBot {
       `⚙️ *Config*\n` +
       `• Trade: ${config.trading.maxTradeSol} SOL (size by confidence)\n` +
       `• MCap: $${(config.trading.minMcapUsd/1000).toFixed(0)}K – $${(config.trading.maxMcapUsd/1000000).toFixed(0)}M\n` +
-      `• Stop Loss: -${config.risk.stopLossPct}% | Trailing: ON\n` +
+      `• Stop Loss: -${config.risk.stopLossPct}% (${config.risk.autoStopLossEnabled ? 'AUTO' : 'alert'}) | Trailing: ON\n` +
       `• Partial TP: ON | Time Exit: ON\n` +
       `• RSI exit: >80\n` +
       `• Scan: tiap ${config.scanning.intervalSeconds / 60} menit\n` +
@@ -670,9 +670,9 @@ export class TelegramBot {
       `• Volume confirmation & trend filter\n` +
       `• LOW confidence signals skipped\n\n` +
       `*Exit alerts:*\n` +
-      `🚨 Stop loss -${config.risk.stopLossPct}% (tight)\n` +
+      `🚨 Stop loss -${config.risk.stopLossPct}% (${config.risk.autoStopLossEnabled ? 'auto sell' : 'alert'})\n` +
       `🛡 Trailing stop setelah +15%\n` +
-      `💰 Partial profit di +30% (jual 50%)\n` +
+      `💰 Profit alert di +30% (manual sell)\n` +
       `⏰ Time exit setelah 4 jam stagnan\n` +
       `📈 RSI Peak lebih dari 80\n\n` +
       `*Mode saat ini:* ${config.dryRun ? '🧪 DRY RUN — tidak ada tx nyata' : '🟢 LIVE TRADING'}`,
@@ -697,7 +697,7 @@ export class TelegramBot {
       `• Max Impact: *${config.trading.maxPriceImpactPct}%*\n` +
       `• Min Volume: *$${volK}K* (24h)\n\n` +
       `🛡 *Risk*\n` +
-      `• Stop Loss: *-${config.risk.stopLossPct}%*\n` +
+      `• Stop Loss: *-${config.risk.stopLossPct}%* (${config.risk.autoStopLossEnabled ? 'AUTO SELL' : 'alert only'})\n` +
       `• Take Profit: *+${config.risk.takeProfitPct}%*\n\n` +
       `⏱ *Intervals*\n` +
       `• Scan: *${scanMin} menit*\n` +
@@ -1158,7 +1158,7 @@ export class TelegramBot {
       STOP_LOSS_PCT:   '🚨 *STOP LOSS — JUAL SEGERA*',
       TAKE_PROFIT_PCT: '🎯 *TARGET PROFIT TERCAPAI*',
       TRAILING_STOP:   '🛡 *TRAILING STOP — PROFIT DIKUNCI*',
-      PARTIAL_PROFIT:  '💰 *PARTIAL PROFIT — JUAL SEBAGIAN*',
+      PARTIAL_PROFIT:  '💰 *PROFIT ALERT — KEPUTUSAN MANUAL*',
       TIME_EXIT:       '⏰ *TIME EXIT — POSISI STAGNAN*',
     };
 
@@ -1168,7 +1168,7 @@ export class TelegramBot {
       STOP_LOSS_PCT:   '🔴 *Loss melebihi threshold — exit manual segera*',
       TAKE_PROFIT_PCT: '💡 Tunggu RSI peak >80 untuk exit optimal',
       TRAILING_STOP:   '🛡 Profit sudah turun dari peak — jual sebelum loss!',
-      PARTIAL_PROFIT:  '💰 Lock profit 50% dulu, sisanya biarkan jalan',
+      PARTIAL_PROFIT:  '💰 Profit sudah masuk target bertahap — jual hanya jika kamu setuju',
       TIME_EXIT:       '⏰ Posisi terlalu lama stagnan — cut loss & cari lain',
     };
 
@@ -1187,11 +1187,11 @@ export class TelegramBot {
       rsiInfo +
       `⏱ Hold: ${holdMin}m\n\n` +
       `${urgency[reason] ?? ''}\n\n` +
-      (isPartial ? `_⚠️ Ini alert PARTIAL — jual sebagian posisi saja_\n\n` : '') +
+      (isPartial ? `_⚠️ Ini alert profit. Tombol SELL menjual seluruh posisi; abaikan jika mau hold._\n\n` : '') +
       `🔗 [DexScreener](https://dexscreener.com/solana/${position.tokenAddress})`;
 
     const keyboard = Markup.inlineKeyboard([
-      [Markup.button.callback(`🔴 SELL NOW ${safeSym}${isPartial ? ' (50%)' : ''}`, `SELL_${position.id}`)],
+      [Markup.button.callback(`🔴 SELL NOW ${safeSym}`, `SELL_${position.id}`)],
       [Markup.button.callback('🔄 Refresh Price', `REFRESH_EXIT_${position.id}`)],
       [Markup.button.callback('✖️ DISMISS', 'DISMISS_EXIT')],
     ]);

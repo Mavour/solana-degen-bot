@@ -41,6 +41,7 @@ export interface RuntimeSettings {
   scanIntervalSeconds?: number;
   monitorIntervalSeconds?: number;
   dryRun?: boolean;
+  autoStopLossEnabled?: boolean;
 }
 
 function loadSettings(): RuntimeSettings {
@@ -115,6 +116,7 @@ function buildConfig() {
       maxOpenPositions: parseInt(optionalEnv('MAX_OPEN_POSITIONS', '3')),
       stopLossPct: parseFloat(optionalEnv('STOP_LOSS_PCT', '8')),
       takeProfitPct: parseFloat(optionalEnv('TAKE_PROFIT_PCT', '50')),
+      autoStopLossEnabled: optionalEnv('AUTO_STOP_LOSS_ENABLED', 'true') === 'true',
     },
     dryRun: optionalEnv('DRY_RUN', 'false') === 'true',
     logging: {
@@ -141,6 +143,7 @@ function applyToConfig(base: any, runtime: RuntimeSettings) {
   if (runtime.scanIntervalSeconds !== undefined) base.scanning.intervalSeconds = runtime.scanIntervalSeconds;
   if (runtime.monitorIntervalSeconds !== undefined) base.monitor.intervalSeconds = runtime.monitorIntervalSeconds;
   if (runtime.dryRun !== undefined) base.dryRun = runtime.dryRun;
+  if (runtime.autoStopLossEnabled !== undefined) base.risk.autoStopLossEnabled = runtime.autoStopLossEnabled;
 }
 
 /**

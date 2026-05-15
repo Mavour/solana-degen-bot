@@ -26,6 +26,8 @@ const STOCH_RSI_CONFIG = {
 const RSI_BOTTOMING_THRESHOLD = parseInt(process.env.RSI_BOTTOMING_THRESHOLD ?? '20');
 // EMA touch tolerance: harga dalam X% dari EMA dianggap "touching"
 const EMA_TOUCH_TOLERANCE_PCT = parseFloat(process.env.EMA_TOUCH_TOLERANCE_PCT ?? '2.0');
+// DexScreener fallback builds synthetic OHLCV. Good for price context, too noisy for entries.
+const ALLOW_SYNTHETIC_OHLCV_SIGNALS = (process.env.ALLOW_SYNTHETIC_OHLCV_SIGNALS ?? 'false') === 'true';
 
 // ── Trend Filter Config ──
 // Hanya buy jika harga di atas EMA ini (trend bullish)
@@ -36,7 +38,7 @@ const SLOW_EMA_PERIOD = parseInt(process.env.SLOW_EMA_PERIOD ?? '50');
 // Maximum price drop 1h yang diperbolehkan (hindari catching falling knife)
 const MAX_1H_DROP_PCT = parseFloat(process.env.MAX_1H_DROP_PCT ?? '-15');
 // Minimum volume surge ratio (volume saat ini vs rata-rata)
-const MIN_VOLUME_SURGE_RATIO = parseFloat(process.env.MIN_VOLUME_SURGE_RATIO ?? '1.0');
+const MIN_VOLUME_SURGE_RATIO = parseFloat(process.env.MIN_VOLUME_SURGE_RATIO ?? '1.2');
 
 interface EMASeries {
   period: EMAPeriod;
@@ -109,7 +111,7 @@ function calculateStochRSI(closes: number[]): StochRSIResult | null {
     const d = latest.d ?? 0;
 
     // Cek apakah sedang bottoming:
-    // K dan D keduanya di bawah threshold ATAU K crossing up dari D (bullish divergence)
+    // K harus mulai memimpin D. Keduanya oversold tapi K masih jatuh = belum valid.
     const bothBelowThreshold = k < RSI_BOTTOMING_THRESHOLD && d < RSI_BOTTOMING_THRESHOLD;
 
     // Check K crossing up dari D (K dari bawah D ke atas D)
@@ -121,7 +123,7 @@ function calculateStochRSI(closes: number[]): StochRSIResult | null {
       kCrossingUp = prevK < prevD && k >= d && k < 35; // Cross up tapi masih rendah
     }
 
-    const isBottoming = bothBelowThreshold || kCrossingUp;
+    const isBottoming = kCrossingUp || (bothBelowThreshold && k >= d);
 
     return { k, d, isBottoming };
   } catch (err) {
@@ -238,6 +240,11 @@ function checkTrendFilter(emas: EMASeries[], currentPrice: number): {
  * Strategy v2: EMA bounce di UPTREND + volume confirmation
  */
 export function analyzeToken(token: TokenInfo): SignalResult | null {
+  if (token.ohlcvSource === 'synthetic' && !ALLOW_SYNTHETIC_OHLCV_SIGNALS) {
+    logger.debug(MODULE, `${token.symbol}: rejected - synthetic OHLCV is disabled for entries`);
+    return null;
+  }
+
   if (token.ohlcv.length < 50) {
     logger.debug(MODULE, `${token.symbol}: insufficient OHLCV (${token.ohlcv.length} candles, need 50)`);
     return null;
@@ -299,10 +306,12 @@ export function analyzeToken(token: TokenInfo): SignalResult | null {
 
   const emaTouch = closestEMA !== null &&
     isPriceTouchingEMA(currentPrice, closestEMA.currentValue);
+  const closeRecoveredAboveEma = closestEMA !== null &&
+    currentPrice >= closestEMA.currentValue * (1 - (EMA_TOUCH_TOLERANCE_PCT / 100 / 2));
 
   // Signal condition: EMA touch AND Stoch RSI bottoming AND trend OK AND volume OK
-  if (!emaTouch || !stochRsi.isBottoming) {
-    logger.debug(MODULE, `${token.symbol}: No signal (emaTouch=${emaTouch}, rsiBottom=${stochRsi.isBottoming})`);
+  if (!emaTouch || !closeRecoveredAboveEma || !stochRsi.isBottoming) {
+    logger.debug(MODULE, `${token.symbol}: No signal (emaTouch=${emaTouch}, recovered=${closeRecoveredAboveEma}, rsiBottom=${stochRsi.isBottoming})`);
     return null;
   }
 
