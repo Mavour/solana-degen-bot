@@ -44,7 +44,9 @@ function getBrowserHeaders(): Record<string, string> {
 
   // GMGN API Key — coba semua format header yang umum
   if (config.gmgn.apiKey) {
+    // GMGN's documented API key header is x-route-key.
     headers['Authorization'] = `Bearer ${config.gmgn.apiKey}`;
+    headers['x-route-key'] = config.gmgn.apiKey;
     headers['X-API-Key'] = config.gmgn.apiKey;
     headers['x-api-key'] = config.gmgn.apiKey;
     headers['API-Key'] = config.gmgn.apiKey;
@@ -92,14 +94,10 @@ export class GMGNScanner {
     // Cookie jar sederhana
     const cookieJar: string[] = [];
 
-    // Auto-inject API key ke semua request sebagai query param
     this.client.interceptors.request.use((req) => {
-      if (config.gmgn.apiKey) {
+      if (config.gmgn.apiKey && (process.env.GMGN_API_KEY_QUERY_PARAM ?? 'false') === 'true') {
         req.params = req.params || {};
-        // Cuma tambah api_key (format paling umum GMGN)
-        // Kalau masih 403, user perlu cek exact header/param dari browser Network tab
         req.params.api_key = config.gmgn.apiKey;
-        // Log URL untuk debug (sensor key)
         const url = req.url ?? '';
         const fullUrl = `${req.baseURL}${url}`;
         logger.debug(MODULE, `GMGN request: ${fullUrl.split('?')[0]}?api_key=***`);
@@ -126,8 +124,8 @@ export class GMGNScanner {
           const hasProxy = !!config.proxy.url;
           if (!hasApiKey && !hasCookie && !hasProxy) {
             logger.warn(MODULE, `GMGN 403 - IP blocked. Tambahkan GMGN_API_KEY, GMGN_SESSION_COOKIE, atau PROXY_URL di .env`);
-          } else if (hasApiKey) {
-            logger.warn(MODULE, `GMGN 403 - API key invalid atau expired. Coba generate ulang GMGN_API_KEY.`);
+        } else if (hasApiKey) {
+          logger.warn(MODULE, `GMGN 403 - request ditolak. API key terbaca; cek apakah key punya akses endpoint data/rank, IP whitelist, atau butuh GMGN_SESSION_COOKIE.`);
           } else if (hasCookie) {
             logger.warn(MODULE, `GMGN 403 - Session cookie expired. Coba update GMGN_SESSION_COOKIE.`);
           } else {
