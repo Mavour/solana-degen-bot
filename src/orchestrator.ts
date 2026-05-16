@@ -177,7 +177,7 @@ export class BotOrchestrator {
       logger.info(MODULE, `📊 [${source.toUpperCase()}] ${tokens.length} tokens`);
 
       tokens.forEach(t => {
-        logger.info(MODULE, `  ✓ ${t.symbol} | MCap:$${(t.mcapUsd/1000).toFixed(0)}K | Age:${Math.floor(t.ageSeconds/3600)}h | OHLCV:${t.ohlcv.length}`);
+        logger.info(MODULE, `  ✓ ${t.symbol} | MCap:$${(t.mcapUsd/1000).toFixed(0)}K | Age:${Math.floor(t.ageSeconds/3600)}h | OHLCV:${t.ohlcv.length} ${t.ohlcvSource ?? 'unknown'}`);
       });
 
       const signals = analyzeTokens(tokens);

@@ -335,6 +335,9 @@ export class DexScreenerScanner {
       tokens.push(await this.pairToTokenInfo(pair));
       await sleep(350);
     }
+    const realCount = tokens.filter(t => t.ohlcvSource === 'real').length;
+    const syntheticCount = tokens.filter(t => t.ohlcvSource === 'synthetic').length;
+    logger.info(MODULE, `OHLCV sources: real=${realCount} synthetic=${syntheticCount}`);
     logger.info(MODULE, `DexScreener done: ${tokens.length} tokens ready`);
     return tokens;
   }
