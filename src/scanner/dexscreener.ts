@@ -37,6 +37,7 @@ interface DSPair {
 
 export class DexScreenerScanner {
   private client: AxiosInstance;
+  private geckoClient: AxiosInstance;
 
   constructor() {
     this.client = axios.create({
@@ -45,6 +46,15 @@ export class DexScreenerScanner {
       headers: {
         'User-Agent': 'Mozilla/5.0 (compatible; DegenBot/1.0)',
         'Accept': 'application/json',
+      },
+    });
+
+    this.geckoClient = axios.create({
+      baseURL: 'https://api.geckoterminal.com/api/v2',
+      timeout: 15000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; DegenBot/1.0)',
+        'Accept': 'application/json;version=20230302',
       },
     });
   }
@@ -232,13 +242,52 @@ export class DexScreenerScanner {
   }
 
   /**
+   * Fetch real on-chain OHLCV from GeckoTerminal using the pool address.
+   * This keeps DexScreener fallback usable for signals without relying on synthetic candles.
+   */
+  private async fetchGeckoOHLCV(poolAddress: string, limit: number = 200): Promise<OHLCVCandle[]> {
+    if (!poolAddress) return [];
+
+    try {
+      const res = await this.geckoClient.get(
+        `/networks/solana/pools/${poolAddress}/ohlcv/minute`,
+        { params: { aggregate: 5, limit, currency: 'usd' } }
+      );
+
+      const list = res.data?.data?.attributes?.ohlcv_list;
+      if (!Array.isArray(list) || list.length === 0) return [];
+
+      const candles = list
+        .map((row: any[]) => ({
+          timestamp: Number(row[0] ?? 0),
+          open: Number(row[1] ?? 0),
+          high: Number(row[2] ?? 0),
+          low: Number(row[3] ?? 0),
+          close: Number(row[4] ?? 0),
+          volume: Number(row[5] ?? 0),
+        }))
+        .filter((c: OHLCVCandle) => c.timestamp > 0 && c.close > 0)
+        .sort((a: OHLCVCandle, b: OHLCVCandle) => a.timestamp - b.timestamp);
+
+      logger.debug(MODULE, `Gecko OHLCV ${poolAddress.slice(0, 8)}: ${candles.length} candles`);
+      return candles;
+    } catch (err: any) {
+      const status = err.response?.status ?? 'no-resp';
+      logger.debug(MODULE, `Gecko OHLCV failed ${poolAddress.slice(0, 8)}: HTTP ${status}`);
+      return [];
+    }
+  }
+
+  /**
    * Convert DSPair → TokenInfo
    */
-  pairToTokenInfo(pair: DSPair): TokenInfo {
+  async pairToTokenInfo(pair: DSPair): Promise<TokenInfo> {
     const now   = Math.floor(Date.now() / 1000);
     const price = parseFloat(pair.priceUsd ?? '0');
     const mcap  = pair.marketCap ?? pair.fdv ?? 0;
     const createdSec = pair.pairCreatedAt ? pair.pairCreatedAt / 1000 : now - 7200;
+    const geckoOhlcv = await this.fetchGeckoOHLCV(pair.pairAddress, 200);
+    const hasRealOhlcv = geckoOhlcv.length >= 50;
 
     return {
       address:      pair.baseToken.address,
@@ -252,8 +301,8 @@ export class DexScreenerScanner {
       priceUsd:     price,
       priceChangePct1h: pair.priceChange?.h1 ?? 0,
       holders:      0,
-      ohlcv:        this.buildSyntheticOHLCV(pair, price),
-      ohlcvSource:  'synthetic',
+      ohlcv:        hasRealOhlcv ? geckoOhlcv : this.buildSyntheticOHLCV(pair, price),
+      ohlcvSource:  hasRealOhlcv ? 'real' : 'synthetic',
     };
   }
 
@@ -280,8 +329,12 @@ export class DexScreenerScanner {
     const filtered = this.filterPairs(pairs);
     if (!filtered.length) return [];
 
-    // Step 4: convert
-    const tokens = filtered.slice(0, 10).map(p => this.pairToTokenInfo(p));
+    // Step 4: convert + enrich with real OHLCV when available
+    const tokens: TokenInfo[] = [];
+    for (const pair of filtered.slice(0, 10)) {
+      tokens.push(await this.pairToTokenInfo(pair));
+      await sleep(350);
+    }
     logger.info(MODULE, `DexScreener done: ${tokens.length} tokens ready`);
     return tokens;
   }
