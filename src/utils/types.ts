@@ -15,6 +15,7 @@ export interface TokenInfo {
   // OHLCV data for indicator calculation
   ohlcv: OHLCVCandle[];
   ohlcvSource?: 'real' | 'synthetic';
+  analysisTimeframe?: '15s' | '1m' | '5m' | '15m';
 }
 
 export interface OHLCVCandle {
@@ -34,6 +35,11 @@ export interface SignalResult {
   stochRsiK: number;
   stochRsiD: number;
   stochRsiBottoming: boolean;
+  entryConfirmation?: 'C2_CONTINUATION' | 'C3_REVERSAL';
+  keyLevelType?: 'EMA' | 'FIB';
+  keyLevelLabel?: string;
+  keyLevelValue?: number;
+  analysisTimeframe?: '15s' | '1m' | '5m' | '15m';
   confidence: 'LOW' | 'MEDIUM' | 'HIGH';
   timestamp: number;
 }

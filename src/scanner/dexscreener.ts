@@ -5,8 +5,10 @@ import axios, { AxiosInstance } from 'axios';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 import { TokenInfo, OHLCVCandle } from '../utils/types';
+import { selectObicleTimeframe } from '../analysis/indicators';
 
 const MODULE = 'DEXSCREENER';
+type ObicleTimeframe = '15s' | '1m' | '5m' | '15m';
 
 // Boost profile (dari /token-boosts endpoints)
 interface DSBoostProfile {
@@ -33,6 +35,13 @@ interface DSPair {
   fdv?: number;
   marketCap?: number;
   pairCreatedAt?: number;
+}
+
+function geckoAggregateForTimeframe(timeframe: ObicleTimeframe): number {
+  if (timeframe === '15m') return 15;
+  if (timeframe === '5m') return 5;
+  // GeckoTerminal minute endpoint cannot provide 15s candles; 1m is the closest fallback.
+  return 1;
 }
 
 export class DexScreenerScanner {
@@ -245,13 +254,18 @@ export class DexScreenerScanner {
    * Fetch real on-chain OHLCV from GeckoTerminal using the pool address.
    * This keeps DexScreener fallback usable for signals without relying on synthetic candles.
    */
-  private async fetchGeckoOHLCV(poolAddress: string, limit: number = 200): Promise<OHLCVCandle[]> {
+  private async fetchGeckoOHLCV(
+    poolAddress: string,
+    limit: number = 200,
+    timeframe: ObicleTimeframe = '5m'
+  ): Promise<OHLCVCandle[]> {
     if (!poolAddress) return [];
 
     try {
+      const aggregate = geckoAggregateForTimeframe(timeframe);
       const res = await this.geckoClient.get(
         `/networks/solana/pools/${poolAddress}/ohlcv/minute`,
-        { params: { aggregate: 5, limit, currency: 'usd' } }
+        { params: { aggregate, limit, currency: 'usd' } }
       );
 
       const list = res.data?.data?.attributes?.ohlcv_list;
@@ -269,7 +283,7 @@ export class DexScreenerScanner {
         .filter((c: OHLCVCandle) => c.timestamp > 0 && c.close > 0)
         .sort((a: OHLCVCandle, b: OHLCVCandle) => a.timestamp - b.timestamp);
 
-      logger.debug(MODULE, `Gecko OHLCV ${poolAddress.slice(0, 8)}: ${candles.length} candles`);
+      logger.debug(MODULE, `Gecko OHLCV ${poolAddress.slice(0, 8)} ${timeframe}/${aggregate}m: ${candles.length} candles`);
       return candles;
     } catch (err: any) {
       const status = err.response?.status ?? 'no-resp';
@@ -286,7 +300,9 @@ export class DexScreenerScanner {
     const price = parseFloat(pair.priceUsd ?? '0');
     const mcap  = pair.marketCap ?? pair.fdv ?? 0;
     const createdSec = pair.pairCreatedAt ? pair.pairCreatedAt / 1000 : now - 7200;
-    const geckoOhlcv = await this.fetchGeckoOHLCV(pair.pairAddress, 200);
+    const ageSeconds = now - createdSec;
+    const timeframe = selectObicleTimeframe(ageSeconds);
+    const geckoOhlcv = await this.fetchGeckoOHLCV(pair.pairAddress, 200, timeframe);
     const hasRealOhlcv = geckoOhlcv.length >= 50;
 
     return {
@@ -297,12 +313,13 @@ export class DexScreenerScanner {
       liquidityUsd: pair.liquidity?.usd ?? 0,
       volumeUsd24h: pair.volume?.h24 ?? 0,
       globalFeeSol: 0,
-      ageSeconds:   now - createdSec,
+      ageSeconds,
       priceUsd:     price,
       priceChangePct1h: pair.priceChange?.h1 ?? 0,
       holders:      0,
       ohlcv:        hasRealOhlcv ? geckoOhlcv : this.buildSyntheticOHLCV(pair, price),
       ohlcvSource:  hasRealOhlcv ? 'real' : 'synthetic',
+      analysisTimeframe: timeframe,
     };
   }
 

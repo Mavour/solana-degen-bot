@@ -158,13 +158,16 @@ pm2 logs solana-degen-bot
 
 ## 📊 Indicator Settings (Obicle Method)
 
-| Indicator | Setting | Signal |
-|-----------|---------|--------|
-| EMA Cross | Short: 25, Long: 50 | Primary trend |
-| EMA Cross | Short: 100, Long: 200 | Major trend |
+| Rule | Setting | Signal |
+|------|---------|--------|
+| Screening | Age > 1h, mcap > $150K, fee ratio 0.1 SOL / $1K mcap | Avoid too-new/low-fee tokens |
+| Timeframe | 1-4h: 15s, 4-12h: 1m, 12-48h: 5m, >48h: 15m | Match token age from Obicle guide |
+| EMA | 25/50/100/200 | Key level and trend context |
+| Fibonacci | 38.2/50/61.8 from recent swing | Additional key levels |
 | Stochastic RSI | 14, 14, 3, 3 (default) | Entry timing |
+| Candle Closure | C2 close above key level or C3 reclaim | Entry confirmation |
 
-**Entry Condition:** Price touches any EMA **AND** Stoch RSI < 20 (bottoming)
+**Entry Condition:** EMA/Fibo key-level candle close confirmation **AND** Stoch RSI < 20 (bottoming)
 
 **Exit Hint:** Manual exit when Stoch RSI peaks (>80)
 

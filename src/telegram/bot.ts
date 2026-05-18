@@ -72,6 +72,8 @@ interface MissedSignal {
   tokenAddress: string;
   confidence: string;
   emaTouched: number;
+  keyLevelLabel?: string;
+  analysisTimeframe?: string;
   stochRsiK: number;
   mcapUsd: number;
   expiredAt: number;
@@ -580,7 +582,7 @@ export class TelegramBot {
       const confEmoji = ({ HIGH: '🔥', MEDIUM: '⚡', LOW: '💡' } as Record<string,string>)[req.signal.confidence];
 
       text += `${confEmoji} *${safeSymbol(token.symbol)}* | ${req.signal.confidence}\n`;
-      text += `📊 $${formatNumber(token.mcapUsd)} | EMA${req.signal.emaTouched} | RSI K:${req.signal.stochRsiK.toFixed(1)}\n`;
+      text += `📊 $${formatNumber(token.mcapUsd)} | ${req.signal.keyLevelLabel ?? `EMA${req.signal.emaTouched}`} | TF ${req.signal.analysisTimeframe ?? token.analysisTimeframe ?? 'n/a'} | RSI K:${req.signal.stochRsiK.toFixed(1)}\n`;
       text += `⏰ ${remainMin}min remaining | ${req.tradeParams.amountSol} SOL\n`;
       text += `🔗 [DexScreener](https://dexscreener.com/solana/${token.address}) | [GMGN](https://gmgn.ai/sol/token/${token.address})\n\n`;
     }
@@ -633,7 +635,7 @@ export class TelegramBot {
       const emoji = ({ HIGH: '🔥', MEDIUM: '⚡', LOW: '💡' } as Record<string,string>)[s.confidence] ?? '';
       const label = s.reason === 'EXPIRED' ? '⏰ expired' : '❌ cancelled';
       text += `• *${s.symbol}* ${emoji} — ${label} ${ago}m lalu\n`;
-      text += `  EMA${s.emaTouched} | RSI:${s.stochRsiK.toFixed(0)} | $${formatNumber(s.mcapUsd)}\n`;
+      text += `  ${s.keyLevelLabel ?? `EMA${s.emaTouched}`} | TF ${s.analysisTimeframe ?? 'n/a'} | RSI:${s.stochRsiK.toFixed(0)} | $${formatNumber(s.mcapUsd)}\n`;
       text += `  [Chart](https://dexscreener.com/solana/${s.tokenAddress})\n`;
     }
 
@@ -904,6 +906,9 @@ export class TelegramBot {
     const remainMin = ttlMin - ageMin;
     const confEmoji = ({ HIGH: '🔥', MEDIUM: '⚡', LOW: '💡' } as Record<string,string>)[request.signal.confidence];
     const safeSymbolStr = safeSymbol(token.symbol);
+    const keyLabel = request.signal.keyLevelLabel ?? `EMA${request.signal.emaTouched}`;
+    const entryLabel = (request.signal.entryConfirmation ?? 'EMA_TOUCH').replace(/_/g, ' ');
+    const timeframe = request.signal.analysisTimeframe ?? token.analysisTimeframe ?? 'n/a';
 
     const tokenAgeH = Math.floor(token.ageSeconds / 3600);
     const tokenAgeM = Math.floor((token.ageSeconds % 3600) / 60);
@@ -913,7 +918,7 @@ export class TelegramBot {
       `🎯 *${request.signal.confidence}* ${confEmoji} | *${safeSymbolStr}*\n` +
       `📊 $${formatNumber(token.mcapUsd)} | 💧 $${formatNumber(token.liquidityUsd)} | 🕐 ${tokenAgeH}h${tokenAgeM}m\n` +
       `💵 *Price refreshed: $${freshPrice.toFixed(8)}*\n\n` +
-      `📈 EMA${request.signal.emaTouched} Touch ✅ | RSI K:${request.signal.stochRsiK.toFixed(1)} D:${request.signal.stochRsiD.toFixed(1)} | ${request.signal.stochRsiBottoming ? '📉 BOTTOMING' : '➖ Normal'}\n\n` +
+      `📈 ${keyLabel} ${entryLabel} | TF ${timeframe} | RSI K:${request.signal.stochRsiK.toFixed(1)} D:${request.signal.stochRsiD.toFixed(1)} | ${request.signal.stochRsiBottoming ? '📉 BOTTOMING' : '➖ Normal'}\n\n` +
       `💰 ${request.tradeParams.amountSol} SOL${isDryRun ? ' paper' : ''} | Slippage ${request.tradeParams.slippagePct}% | Impact ${request.quoteResult.priceImpactPct.toFixed(2)}%\n` +
       `🔗 [DexScreener](https://dexscreener.com/solana/${token.address}) | [GMGN](https://gmgn.ai/sol/token/${token.address})\n\n` +
       (isDryRun
@@ -987,6 +992,9 @@ export class TelegramBot {
     const tokenAgeMin = Math.floor((token.ageSeconds % 3600) / 60);
     const confEmoji   = ({ HIGH: '🔥', MEDIUM: '⚡', LOW: '💡' } as Record<string,string>)[signal.confidence];
     const safeSymbolStr = safeSymbol(token.symbol);
+    const keyLabel = signal.keyLevelLabel ?? `EMA${signal.emaTouched}`;
+    const entryLabel = (signal.entryConfirmation ?? 'EMA_TOUCH').replace(/_/g, ' ');
+    const timeframe = signal.analysisTimeframe ?? token.analysisTimeframe ?? 'n/a';
 
     // Balance warning untuk LIVE mode
     const balanceWarning = !isDryRun
@@ -998,7 +1006,7 @@ export class TelegramBot {
       (isDryRun ? `🧪 *DRY RUN* ` : '') +
       `🎯 *${signal.confidence}* ${confEmoji} | *${safeSymbolStr}*\n` +
       `📊 $${formatNumber(token.mcapUsd)} | 💧 $${formatNumber(token.liquidityUsd)} | 🕐 ${tokenAge}h${tokenAgeMin}m | _just now_\n\n` +
-      `📈 EMA${signal.emaTouched} Touch ✅ | RSI K:${signal.stochRsiK.toFixed(1)} D:${signal.stochRsiD.toFixed(1)} | ${signal.stochRsiBottoming ? '📉 BOTTOMING' : '➖ Normal'}\n\n` +
+      `📈 ${keyLabel} ${entryLabel} | TF ${timeframe} | RSI K:${signal.stochRsiK.toFixed(1)} D:${signal.stochRsiD.toFixed(1)} | ${signal.stochRsiBottoming ? '📉 BOTTOMING' : '➖ Normal'}\n\n` +
       `💰 ${tradeParams.amountSol} SOL${isDryRun ? ' paper' : ''} | Slippage ${tradeParams.slippagePct}% | Impact ${quoteResult.priceImpactPct.toFixed(2)}%\n` +
       `${balanceWarning}` +
       `🔗 [DexScreener](https://dexscreener.com/solana/${token.address}) | [GMGN](https://gmgn.ai/sol/token/${token.address})\n\n` +
@@ -1060,7 +1068,7 @@ export class TelegramBot {
             (isDryRun ? `🧪 *DRY RUN* ` : '') +
             `🎯 *${signal.confidence}* ${confEmoji} | *${safeSymbolStr}*\n` +
             `📊 $${formatNumber(token.mcapUsd)} | 💧 $${formatNumber(token.liquidityUsd)} | 🕐 ${tokenAge}h${tokenAgeMin}m\n\n` +
-            `📈 EMA${signal.emaTouched} Touch ✅ | RSI K:${signal.stochRsiK.toFixed(1)} D:${signal.stochRsiD.toFixed(1)}\n\n` +
+            `📈 ${keyLabel} ${entryLabel} | TF ${timeframe} | RSI K:${signal.stochRsiK.toFixed(1)} D:${signal.stochRsiD.toFixed(1)}\n\n` +
             `⏰ *EXPIRED* — tidak direspons dalam ${ttlMin} menit.`,
             { parse_mode: 'Markdown', link_preview_options: { is_disabled: true } }
           );
@@ -1283,6 +1291,8 @@ export class TelegramBot {
       tokenAddress: signal.token.address,
       confidence: signal.confidence,
       emaTouched: signal.emaTouched,
+      keyLevelLabel: signal.keyLevelLabel,
+      analysisTimeframe: signal.analysisTimeframe ?? signal.token.analysisTimeframe,
       stochRsiK: signal.stochRsiK,
       mcapUsd: signal.token.mcapUsd,
       expiredAt: Date.now(),

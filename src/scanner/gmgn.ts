@@ -5,8 +5,10 @@ import axios, { AxiosInstance } from 'axios';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 import { TokenInfo, OHLCVCandle } from '../utils/types';
+import { selectObicleTimeframe } from '../analysis/indicators';
 
 const MODULE = 'GMGN';
+type ObicleTimeframe = '15s' | '1m' | '5m' | '15m';
 
 // WSOL mint address
 export const WSOL = 'So11111111111111111111111111111111111111112';
@@ -60,6 +62,21 @@ function getBrowserHeaders(): Record<string, string> {
   }
 
   return headers;
+}
+
+function gmgnResolutionCandidates(timeframe: ObicleTimeframe): string[] {
+  const primary = {
+    '15s': '15s',
+    '1m': '1',
+    '5m': '5',
+    '15m': '15',
+  }[timeframe];
+
+  const fallbacks = timeframe === '15s'
+    ? ['1', '5']
+    : ['5', '1', '15'];
+
+  return Array.from(new Set([primary, ...fallbacks]));
 }
 
 export class GMGNScanner {
@@ -261,34 +278,40 @@ export class GMGNScanner {
   /**
    * Fetch OHLCV — coba beberapa format endpoint
    */
-  async fetchOHLCV(tokenAddress: string, limit: number = 200): Promise<OHLCVCandle[]> {
+  async fetchOHLCV(
+    tokenAddress: string,
+    limit: number = 200,
+    timeframe: ObicleTimeframe = '5m'
+  ): Promise<OHLCVCandle[]> {
     const endpoints = [
       `/api/v1/token_kline/sol/${tokenAddress}`,
       `/defi/quotation/v1/token_kline/sol/${tokenAddress}`,
     ];
 
-    for (const url of endpoints) {
-      try {
-        const res = await this.client.get(url, {
-          params: { resolution: '5', limit },
-        });
+    for (const resolution of gmgnResolutionCandidates(timeframe)) {
+      for (const url of endpoints) {
+        try {
+          const res = await this.client.get(url, {
+            params: { resolution, limit },
+          });
 
-        const list = res.data?.data?.list ?? res.data?.list ?? [];
-        if (!Array.isArray(list) || list.length === 0) continue;
+          const list = res.data?.data?.list ?? res.data?.list ?? [];
+          if (!Array.isArray(list) || list.length === 0) continue;
 
-        const candles: OHLCVCandle[] = list.map((c: any) => ({
-          timestamp: Number(c.timestamp || c.time || 0),
-          open:  parseFloat(c.open  || c.o || 0),
-          high:  parseFloat(c.high  || c.h || 0),
-          low:   parseFloat(c.low   || c.l || 0),
-          close: parseFloat(c.close || c.c || 0),
-          volume: parseFloat(c.volume || c.v || 0),
-        })).filter((c: OHLCVCandle) => c.close > 0);
+          const candles: OHLCVCandle[] = list.map((c: any) => ({
+            timestamp: Number(c.timestamp || c.time || 0),
+            open:  parseFloat(c.open  || c.o || 0),
+            high:  parseFloat(c.high  || c.h || 0),
+            low:   parseFloat(c.low   || c.l || 0),
+            close: parseFloat(c.close || c.c || 0),
+            volume: parseFloat(c.volume || c.v || 0),
+          })).filter((c: OHLCVCandle) => c.close > 0);
 
-        logger.debug(MODULE, `OHLCV ${tokenAddress.slice(0,8)}: ${candles.length} candles`);
-        return candles;
-      } catch {
-        // try next endpoint
+          logger.debug(MODULE, `OHLCV ${tokenAddress.slice(0,8)} ${timeframe}/${resolution}: ${candles.length} candles`);
+          return candles;
+        } catch {
+          // try next endpoint/resolution
+        }
       }
     }
 
@@ -300,17 +323,16 @@ export class GMGNScanner {
    */
   async fetchTokenDetail(tokenAddress: string): Promise<TokenInfo | null> {
     try {
-      const [detailRes, ohlcv] = await Promise.allSettled([
-        this.client.get(`/api/v1/token_info/sol/${tokenAddress}`),
-        this.fetchOHLCV(tokenAddress, 200),
-      ]);
+      const detailRes = await this.client.get(`/api/v1/token_info/sol/${tokenAddress}`).catch(() => null);
 
-      const ohlcvData = ohlcv.status === 'fulfilled' ? ohlcv.value : [];
-
-      if (detailRes.status === 'fulfilled') {
-        const t = detailRes.value.data?.data?.token ?? detailRes.value.data?.token;
+      if (detailRes) {
+        const t = detailRes.data?.data?.token ?? detailRes.data?.token;
         if (t) {
           const now = Math.floor(Date.now() / 1000);
+          const ageSeconds = now - (t.open_timestamp || t.created_timestamp || now - 7200);
+          const timeframe = selectObicleTimeframe(ageSeconds);
+          const ohlcvData = await this.fetchOHLCV(tokenAddress, 200, timeframe);
+
           return {
             address: tokenAddress,
             symbol: t.symbol || 'UNKNOWN',
@@ -319,17 +341,21 @@ export class GMGNScanner {
             liquidityUsd: t.liquidity || 0,
             volumeUsd24h: t.volume_24h || t.volume || 0,
             globalFeeSol: t.total_fee_sol ?? t.fee_sol ?? t.total_fee ?? t.fee ?? 0,
-            ageSeconds: now - (t.open_timestamp || t.created_timestamp || now - 7200),
+            ageSeconds,
             priceUsd: t.price || t.usd_price || 0,
             priceChangePct1h: t.price_change_percent1h || t.price_change_1h || 0,
             holders: t.holder_count || t.holders || 0,
             ohlcv: ohlcvData,
             ohlcvSource: 'real',
+            analysisTimeframe: timeframe,
           };
         }
       }
 
       // Fallback: minimal token info tanpa detail
+      const fallbackAgeSeconds = 7200;
+      const fallbackTimeframe = selectObicleTimeframe(fallbackAgeSeconds);
+      const ohlcvData = await this.fetchOHLCV(tokenAddress, 200, fallbackTimeframe);
       if (ohlcvData.length > 0) {
         logger.debug(MODULE, `Using OHLCV-only data for ${tokenAddress.slice(0,8)}`);
         return {
@@ -340,12 +366,13 @@ export class GMGNScanner {
           liquidityUsd: 0,
           volumeUsd24h: 0,
           globalFeeSol: 0,
-          ageSeconds: 7200,
+          ageSeconds: fallbackAgeSeconds,
           priceUsd: ohlcvData[ohlcvData.length - 1]?.close ?? 0,
           priceChangePct1h: 0,
           holders: 0,
           ohlcv: ohlcvData,
           ohlcvSource: 'real',
+          analysisTimeframe: fallbackTimeframe,
         };
       }
 

@@ -13,6 +13,7 @@ const MODULE = 'INDICATORS';
 // EMA periods sesuai Obicle guide
 const EMA_PERIODS = [25, 50, 100, 200] as const;
 type EMAPeriod = typeof EMA_PERIODS[number];
+type ObicleTimeframe = '15s' | '1m' | '5m' | '15m';
 
 // Stoch RSI settings: default (14, 14, 3, 3)
 const STOCH_RSI_CONFIG = {
@@ -39,6 +40,9 @@ const SLOW_EMA_PERIOD = parseInt(process.env.SLOW_EMA_PERIOD ?? '50');
 const MAX_1H_DROP_PCT = parseFloat(process.env.MAX_1H_DROP_PCT ?? '-15');
 // Minimum volume surge ratio (volume saat ini vs rata-rata)
 const MIN_VOLUME_SURGE_RATIO = parseFloat(process.env.MIN_VOLUME_SURGE_RATIO ?? '1.2');
+// Candle close confirmation tolerance around EMA/Fibo key level.
+const KEY_LEVEL_TOLERANCE_PCT = parseFloat(process.env.KEY_LEVEL_TOLERANCE_PCT ?? process.env.EMA_TOUCH_TOLERANCE_PCT ?? '2.0');
+const FIB_LOOKBACK_CANDLES = parseInt(process.env.FIB_LOOKBACK_CANDLES ?? '50');
 
 interface EMASeries {
   period: EMAPeriod;
@@ -50,6 +54,30 @@ interface StochRSIResult {
   k: number;
   d: number;
   isBottoming: boolean;
+}
+
+interface KeyLevel {
+  type: 'EMA' | 'FIB';
+  label: string;
+  value: number;
+  distancePct: number;
+}
+
+interface CandleClosureConfirmation {
+  type: 'C2_CONTINUATION' | 'C3_REVERSAL';
+  label: string;
+}
+
+/**
+ * Obicle PDF timeframe rule:
+ * 1-4h: 15s, 4-12h: 1m, 12-48h: 5m, >48h: 15m.
+ */
+export function selectObicleTimeframe(ageSeconds: number): ObicleTimeframe {
+  const ageHours = ageSeconds / 3600;
+  if (ageHours < 4) return '15s';
+  if (ageHours < 12) return '1m';
+  if (ageHours < 48) return '5m';
+  return '15m';
 }
 
 /**
@@ -143,6 +171,79 @@ function isPriceTouchingEMA(
   if (emaValue === 0) return false;
   const distancePct = Math.abs((currentPrice - emaValue) / emaValue) * 100;
   return distancePct <= tolerancePct;
+}
+
+function buildFibonacciLevels(ohlcv: OHLCVCandle[], currentPrice: number): KeyLevel[] {
+  const recent = ohlcv.slice(-FIB_LOOKBACK_CANDLES);
+  if (recent.length < 10) return [];
+
+  const swingHigh = Math.max(...recent.map(c => c.high));
+  const swingLow = Math.min(...recent.map(c => c.low));
+  const range = swingHigh - swingLow;
+  if (range <= 0 || !Number.isFinite(range)) return [];
+
+  return [0.382, 0.5, 0.618].map((ratio) => {
+    const value = swingHigh - (range * ratio);
+    return {
+      type: 'FIB' as const,
+      label: `FIB${Math.round(ratio * 1000)}`,
+      value,
+      distancePct: Math.abs((currentPrice - value) / value) * 100,
+    };
+  });
+}
+
+function buildKeyLevels(emas: EMASeries[], ohlcv: OHLCVCandle[], currentPrice: number): KeyLevel[] {
+  const emaLevels = emas.map((ema) => ({
+    type: 'EMA' as const,
+    label: `EMA${ema.period}`,
+    value: ema.currentValue,
+    distancePct: Math.abs((currentPrice - ema.currentValue) / ema.currentValue) * 100,
+  }));
+
+  return [...emaLevels, ...buildFibonacciLevels(ohlcv, currentPrice)]
+    .filter(level => level.value > 0 && Number.isFinite(level.value))
+    .sort((a, b) => a.distancePct - b.distancePct);
+}
+
+function candleTouchesLevel(candle: OHLCVCandle, level: number, tolerancePct: number): boolean {
+  const lower = level * (1 - tolerancePct / 100);
+  const upper = level * (1 + tolerancePct / 100);
+  return candle.low <= upper && candle.high >= lower;
+}
+
+/**
+ * Candle closure confirmation from the PDF:
+ * - C2 continuation: current candle touches EMA/Fibo key level and closes above it.
+ * - C3 reversal: previous candle loses the key level, current candle reclaims it.
+ */
+function checkCandleClosureConfirmation(
+  ohlcv: OHLCVCandle[],
+  keyLevel: KeyLevel,
+  tolerancePct: number = KEY_LEVEL_TOLERANCE_PCT
+): CandleClosureConfirmation | null {
+  if (ohlcv.length < 3) return null;
+
+  const current = ohlcv[ohlcv.length - 1];
+  const previous = ohlcv[ohlcv.length - 2];
+
+  const currentTouches = candleTouchesLevel(current, keyLevel.value, tolerancePct);
+  const currentBullishClose = current.close >= keyLevel.value && current.close >= current.open;
+  if (currentTouches && currentBullishClose) {
+    return { type: 'C2_CONTINUATION', label: `${keyLevel.label} C2 close above key level` };
+  }
+
+  const previousTouches = candleTouchesLevel(previous, keyLevel.value, tolerancePct);
+  const previousLostLevel = previousTouches && previous.close < keyLevel.value;
+  const currentReclaimsLevel = current.close > keyLevel.value &&
+    current.close > previous.close &&
+    current.close >= current.open;
+
+  if (previousLostLevel && currentReclaimsLevel) {
+    return { type: 'C3_REVERSAL', label: `${keyLevel.label} C3 reclaim after below-key close` };
+  }
+
+  return null;
 }
 
 /**
@@ -306,12 +407,27 @@ export function analyzeToken(token: TokenInfo): SignalResult | null {
 
   const emaTouch = closestEMA !== null &&
     isPriceTouchingEMA(currentPrice, closestEMA.currentValue);
-  const closeRecoveredAboveEma = closestEMA !== null &&
-    currentPrice >= closestEMA.currentValue * (1 - (EMA_TOUCH_TOLERANCE_PCT / 100 / 2));
 
-  // Signal condition: EMA touch AND Stoch RSI bottoming AND trend OK AND volume OK
-  if (!emaTouch || !closeRecoveredAboveEma || !stochRsi.isBottoming) {
-    logger.debug(MODULE, `${token.symbol}: No signal (emaTouch=${emaTouch}, recovered=${closeRecoveredAboveEma}, rsiBottom=${stochRsi.isBottoming})`);
+  const keyLevels = buildKeyLevels(emas, token.ohlcv, currentPrice)
+    .filter(level => level.distancePct <= KEY_LEVEL_TOLERANCE_PCT);
+
+  let confirmedKeyLevel: KeyLevel | null = null;
+  let candleConfirmation: CandleClosureConfirmation | null = null;
+  for (const keyLevel of keyLevels) {
+    const confirmation = checkCandleClosureConfirmation(token.ohlcv, keyLevel);
+    if (confirmation) {
+      confirmedKeyLevel = keyLevel;
+      candleConfirmation = confirmation;
+      break;
+    }
+  }
+
+  // Signal condition: key level candle close confirmation AND Stoch RSI bottoming.
+  if (!confirmedKeyLevel || !candleConfirmation || !stochRsi.isBottoming) {
+    logger.debug(
+      MODULE,
+      `${token.symbol}: No signal (keyLevel=${confirmedKeyLevel?.label ?? 'none'}, closure=${candleConfirmation?.type ?? 'none'}, emaTouch=${emaTouch}, rsiBottom=${stochRsi.isBottoming})`
+    );
     return null;
   }
 
@@ -324,10 +440,13 @@ export function analyzeToken(token: TokenInfo): SignalResult | null {
   const strongTrend = trend.trendScore >= 3;
   const strongRsi = stochRsi.k < 10 && stochRsi.d < 10;
   const strongVolume = volumeOk && token.priceChangePct1h > 0;
+  const emaKeyLevel = confirmedKeyLevel.type === 'EMA';
+  const c2Continuation = candleConfirmation.type === 'C2_CONTINUATION';
 
-  if (strongRsi && emaTouchedCount >= 2 && strongTrend) {
+  if (strongRsi && (emaTouchedCount >= 2 || (emaKeyLevel && c2Continuation)) && strongTrend) {
     confidence = 'HIGH';
   } else if ((stochRsi.k < 15 && emaTouchedCount >= 1 && trend.trendScore >= 2) ||
+             (stochRsi.k < RSI_BOTTOMING_THRESHOLD && confirmedKeyLevel.distancePct <= KEY_LEVEL_TOLERANCE_PCT / 2) ||
              (strongTrend && strongVolume)) {
     confidence = 'MEDIUM';
   }
@@ -346,6 +465,11 @@ export function analyzeToken(token: TokenInfo): SignalResult | null {
     stochRsiK: stochRsi.k,
     stochRsiD: stochRsi.d,
     stochRsiBottoming: stochRsi.isBottoming,
+    entryConfirmation: candleConfirmation.type,
+    keyLevelType: confirmedKeyLevel.type,
+    keyLevelLabel: confirmedKeyLevel.label,
+    keyLevelValue: confirmedKeyLevel.value,
+    analysisTimeframe: token.analysisTimeframe,
     confidence,
     timestamp: Date.now(),
   };
