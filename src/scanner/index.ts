@@ -1,6 +1,6 @@
 // src/scanner/index.ts
 // Smart Scanner Router
-// Priority: GMGN → DexScreener fallback
+// Default priority: DexScreener → optional GMGN fallback
 // Also handles free RPC rotation on 429 errors
 
 import { Connection } from '@solana/web3.js';
@@ -66,6 +66,7 @@ interface ScannerHealth {
 
 const CIRCUIT_BREAKER_THRESHOLD = 3;    // failures before circuit opens
 const CIRCUIT_RESET_MS = 5 * 60 * 1000; // 5 min cooldown
+type ScannerSource = 'gmgn' | 'dexscreener';
 
 // ── Smart Scanner Router ──────────────────────────────────────
 
@@ -79,7 +80,7 @@ export class ScannerRouter {
     isCircuitOpen: false,
   };
 
-  private lastSource: 'gmgn' | 'dexscreener' | null = null;
+  private lastSource: ScannerSource | null = null;
 
   constructor() {
     this.gmgn = new GMGNScanner();
@@ -87,9 +88,24 @@ export class ScannerRouter {
   }
 
   /**
-   * Main scan: try GMGN first, auto-fallback to DexScreener
+   * Main scan: DexScreener is primary by default.
+   * GMGN can still be used as primary or optional fallback via env config.
    */
-  async scan(): Promise<{ tokens: TokenInfo[]; source: 'gmgn' | 'dexscreener' }> {
+  async scan(): Promise<{ tokens: TokenInfo[]; source: ScannerSource }> {
+    if (config.scanner.primary === 'dexscreener') {
+      const dsResult = await this.scanWithDexScreener();
+      if (dsResult.tokens.length > 0 || !config.scanner.gmgnFallbackEnabled) {
+        return dsResult;
+      }
+
+      logger.info(MODULE, 'DexScreener empty — trying GMGN fallback...');
+      return this.scanWithGMGN();
+    }
+
+    return this.scanWithGMGN();
+  }
+
+  private async scanWithGMGN(): Promise<{ tokens: TokenInfo[]; source: ScannerSource }> {
     // Check if GMGN circuit breaker is open
     if (this.gmgnHealth.isCircuitOpen) {
       const timeSinceOpen = Date.now() - this.gmgnHealth.lastSuccess;
@@ -171,8 +187,10 @@ export class ScannerRouter {
 
     return (
       `📡 *Scanner Status*\n` +
+      `• Primary: ${config.scanner.primary}\n` +
+      `• GMGN fallback: ${config.scanner.gmgnFallbackEnabled ? 'ON' : 'OFF'}\n` +
       `• GMGN: ${gmgnStatus}\n` +
-      `• DexScreener: 🟢 Available (free fallback)\n` +
+      `• DexScreener: 🟢 Available\n` +
       `• Last source: ${this.lastSource ?? 'none'}`
     );
   }

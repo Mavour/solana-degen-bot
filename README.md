@@ -42,9 +42,9 @@ solana-degen-bot/
 [CRON Every 3 min]
        │
        ▼
-[GMGN Scanner]
- • Fetch trending tokens
- • Filter: age >1h, mcap >$150K, fee ratio 1:10
+[DexScreener Scanner]
+ • Fetch boosted/trending token pairs
+ • Filter: age >1h, mcap >$150K, liquidity/volume guards
        │
        ▼
 [Technical Analysis]
@@ -124,6 +124,8 @@ pm2 logs solana-degen-bot
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `MAX_TRADE_SOL` | `0.1` | Max SOL per trade |
+| `SCANNER_PRIMARY` | `dexscreener` | Primary scanner (`dexscreener` or `gmgn`) |
+| `GMGN_FALLBACK_ENABLED` | `false` | Try GMGN only when DexScreener returns empty |
 | `MIN_MCAP_USD` | `150000` | Minimum market cap |
 | `MAX_MCAP_USD` | `5000000` | Maximum market cap (micro-cap ceiling) |
 | `MIN_FEE_SOL_PER_1K_MCAP` | `0.1` | Min SOL fee per $1K mcap (Obicle 1:10) |

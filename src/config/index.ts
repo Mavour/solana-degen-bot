@@ -91,6 +91,10 @@ function buildConfig() {
       apiKey: optionalEnv('GMGN_API_KEY', ''),
       sessionCookie: optionalEnv('GMGN_SESSION_COOKIE', ''),
     },
+    scanner: {
+      primary: optionalEnv('SCANNER_PRIMARY', 'dexscreener').toLowerCase() as 'dexscreener' | 'gmgn',
+      gmgnFallbackEnabled: optionalEnv('GMGN_FALLBACK_ENABLED', 'false') === 'true',
+    },
     trading: {
       maxTradeSol: parseFloat(optionalEnv('MAX_TRADE_SOL', '0.1')),
       minMcapUsd: parseFloat(optionalEnv('MIN_MCAP_USD', '150000')),
